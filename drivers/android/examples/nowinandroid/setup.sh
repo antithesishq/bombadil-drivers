@@ -44,6 +44,7 @@ if [[ ! -d $ANDROID_AVD_HOME/$AVD_NAME.avd ]]; then
 fi
 
 adb start-server
+declare -A pids
 for ((i = 0; i < ${EMULATORS:-1}; i++)); do
   port=$((5554 + 2 * i))
   serial=emulator-$port
@@ -53,13 +54,20 @@ for ((i = 0; i < ${EMULATORS:-1}; i++)); do
     nohup emulator -avd "$AVD_NAME" -port "$port" -read-only -no-snapshot \
       -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect \
       -memory 4096 -cores 4 >"$ANDROID_AVD_HOME/$serial.log" 2>&1 &
+    pids[$serial]=$!
   fi
 done
 for ((i = 0; i < ${EMULATORS:-1}; i++)); do
   serial=emulator-$((5554 + 2 * i))
   start=$SECONDS
-  adb -s "$serial" wait-for-device
-  until [[ $(adb -s "$serial" shell getprop sys.boot_completed | tr -d '\r') == 1 ]]; do sleep 1; done
+  until [[ $(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r') == 1 ]]; do
+    if [[ -n ${pids[$serial]:-} ]] && ! kill -0 "${pids[$serial]}" 2>/dev/null; then
+      echo "$serial exited; see $ANDROID_AVD_HOME/$serial.log" >&2
+      tail -3 "$ANDROID_AVD_HOME/$serial.log" >&2
+      exit 1
+    fi
+    sleep 1
+  done
   adb -s "$serial" install -r -g "$NIA_APK" >/dev/null
   echo "$serial ready ($((SECONDS - start))s)" >&2
 done
