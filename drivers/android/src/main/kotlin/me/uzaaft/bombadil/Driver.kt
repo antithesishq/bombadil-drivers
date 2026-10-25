@@ -22,6 +22,13 @@ interface BombadilDriver {
     /** Name reported to Bombadil in the handshake. */
     val name: String
 
+    /**
+     * How long Bombadil waits for each `state` (including the first one,
+     * after [start]) before considering the driver stalled, or null for
+     * Bombadil's default of 30 seconds.
+     */
+    val stallTimeoutMs: Long? get() = null
+
     /** Launches the app and returns its first settled state. */
     fun start(): JsonElement
 
@@ -73,6 +80,7 @@ fun runDriver(
         put("type", "hello")
         put("protocol", PROTOCOL_VERSION)
         put("name", driver.name)
+        driver.stallTimeoutMs?.let { put("stall_timeout_ms", it) }
     })
     try {
         state(driver.start())

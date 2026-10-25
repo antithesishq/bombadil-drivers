@@ -68,6 +68,19 @@ class DriverTest {
     }
 
     @Test
+    fun announcesTheStallTimeoutInTheHello() {
+        val driver = object : BombadilDriver by FakeDriver() {
+            override val stallTimeoutMs = 120_000L
+        }
+        val output = mutableListOf<String>()
+        session(driver, listOf("""{"type":"terminate"}"""), output)
+        assertEquals(
+            Json.parseToJsonElement("""{"type":"hello","protocol":0,"name":"fake","stall_timeout_ms":120000}"""),
+            Json.parseToJsonElement(output.first()),
+        )
+    }
+
+    @Test
     fun reportsDriverErrorsToBombadilAndStopsTheApp() {
         val driver = FakeDriver()
         val output = mutableListOf<String>()
