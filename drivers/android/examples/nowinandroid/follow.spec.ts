@@ -1,17 +1,22 @@
 // A property that Now in Android rightly violates, to see Bombadil find
-// and shrink a violation: following a topic turns its toggle on.
+// and shrink a violation: following a topic on the Interests tab turns
+// its button into "Unfollow interest". Violating it takes at least two
+// actions (open Interests, follow something), so there's something to
+// shrink.
 import { always } from "@antithesishq/bombadil";
 import { extract } from "@antithesishq/bombadil/external";
 
 export { nowInAndroid } from "./spec.ts";
 
-type Node = { checked: boolean; clickable: boolean; children: Node[] };
+type Node = { label: string; children: Node[] };
 
-// Topic toggles stay clickable when on, unlike the checked radio buttons
-// in the settings dialog.
-const anyToggleOn = (nodes: Node[]): boolean =>
-  nodes.some((n) => (n.checked && n.clickable) || anyToggleOn(n.children));
+const shows = (nodes: Node[], label: string): boolean =>
+  nodes.some((n) => n.label === label || shows(n.children, label));
 
-const following = extract((s: { nodes: Node[] }) => anyToggleOn(s.nodes));
+const followingAnInterest = extract((s: { nodes: Node[] }) =>
+  shows(s.nodes, "Unfollow interest"),
+);
 
-export const noTopicIsEverFollowed = always(() => !following.current);
+export const noInterestIsEverFollowed = always(
+  () => !followingAnInterest.current,
+);
