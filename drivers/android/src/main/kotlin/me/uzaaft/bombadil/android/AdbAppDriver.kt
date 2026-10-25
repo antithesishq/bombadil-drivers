@@ -130,8 +130,12 @@ class AdbAppDriver(
 
     private fun scroll(args: JsonObject): JsonObject? {
         val direction = args.string("direction") ?: "down"
-        val node = if (args.keys.any { it in selectorKeys }) select(args) ?: return null
-        else largestScrollable()
+        val id = args["node"]?.jsonPrimitive?.content
+        val node = when {
+            id != null -> nodes().firstOrNull { it.id == id } ?: return null.also { log("no node $id; skipping") }
+            args.keys.any { it in selectorKeys } -> select(args) ?: return null
+            else -> largestScrollable()
+        }
         val percent = args["percent"]?.jsonPrimitive?.intOrNull
         if (node != null && percent == null) return helper.request("scroll", "node" to node.id, "direction" to direction)
         val area = node?.bounds ?: screenBounds()
