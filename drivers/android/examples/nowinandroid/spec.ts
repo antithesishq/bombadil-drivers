@@ -136,6 +136,6 @@ const back = actions(() => (atStartDestination() ? [] : ["Back"]));
 export const nowInAndroid = weighted([
   [10, tap],
   [3, scroll],
-  [2, typeText],
-  [2, back],
+  [1, typeText],
+  [3, back],
 ]);
