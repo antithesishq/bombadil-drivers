@@ -1,0 +1,10 @@
+name: bombadil_flutter
+description: Write Bombadil external drivers for Flutter apps in Dart.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.4.0
+
+dev_dependencies:
+  test: ^1.25.0
