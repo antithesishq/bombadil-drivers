@@ -11,7 +11,10 @@ class Adb(val serial: String, private val adb: String = "adb") {
     /** Runs `adb -s <serial> <args>` and returns its stdout, failing on a nonzero exit. */
     fun run(vararg args: String, timeoutSeconds: Long = 60): String {
         val command = listOf(adb, "-s", serial) + args
-        val process = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.PIPE).start()
+        val process = synchronized(this) {
+            check(!cancelled) { "cancelled" }
+            ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.PIPE).start().also { current = it }
+        }
         process.outputStream.close()
         val stderr = StringBuilder()
         val stderrReader = Thread { stderr.append(process.errorStream.bufferedReader().readText()) }
@@ -22,10 +25,24 @@ class Adb(val serial: String, private val adb: String = "adb") {
             error("timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}")
         }
         stderrReader.join()
+        check(!cancelled) { "cancelled" }
         check(process.exitValue() == 0) {
             "`${command.joinToString(" ")}` exited with ${process.exitValue()}: $stderr$stdout".trim()
         }
         return stdout
+    }
+
+    @Volatile private var cancelled = false
+    private var current: Process? = null
+
+    /** Kills the command in progress and makes later ones fail, until [resume]. */
+    @Synchronized fun cancel() {
+        cancelled = true
+        current?.destroyForcibly()
+    }
+
+    @Synchronized fun resume() {
+        cancelled = false
     }
 
     /** Runs [command] in the device's shell, without a terminal, and returns its output. */

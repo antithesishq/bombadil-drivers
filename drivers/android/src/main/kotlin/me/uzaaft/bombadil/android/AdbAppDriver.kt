@@ -134,8 +134,11 @@ class AdbAppDriver(
         return settle(action)
     }
 
+    override fun cancel() = adb.cancel()
+
     override fun stop() {
-        runCatching { adb.shell("am force-stop $packageName") }
+        adb.resume()
+        runCatching { adb.shell("am force-stop $packageName", timeoutSeconds = 3) }
     }
 
     private fun scroll(args: JsonObject) {

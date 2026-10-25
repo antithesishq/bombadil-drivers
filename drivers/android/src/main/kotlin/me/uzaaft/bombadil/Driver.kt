@@ -8,6 +8,9 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.concurrent.thread
 
 /** Version of Bombadil's external driver protocol this library speaks. */
 const val PROTOCOL_VERSION = 0
@@ -37,6 +40,14 @@ interface BombadilDriver {
 
     /** Shuts the app down. */
     fun stop()
+
+    /**
+     * Called from another thread when Bombadil asks the driver to stop
+     * while [start] or [apply] may still be running. Drivers whose actions
+     * take a while should make those calls return or throw soon after;
+     * errors after this are not reported. [stop] is called afterwards.
+     */
+    fun cancel() {}
 }
 
 /** Messages Bombadil sends to the driver. */
@@ -82,17 +93,38 @@ fun runDriver(
         put("name", driver.name)
         driver.stallTimeoutMs?.let { put("stall_timeout_ms", it) }
     })
+    // Read on another thread, so that a `terminate` can cancel the action
+    // in progress instead of waiting for it (Bombadil kills drivers that
+    // take more than 5 seconds to exit). A null in the queue stands for
+    // the end of the input.
+    val messages = LinkedBlockingQueue<Result<BombadilMessage?>>()
+    val terminating = AtomicBoolean(false)
+    thread(isDaemon = true, name = "bombadil-reader") {
+        while (true) {
+            val message = runCatching {
+                var line: String?
+                do line = readLine() while (line != null && line.isBlank())
+                line?.let(BombadilMessage::parse)
+            }
+            if (message.getOrNull() == BombadilMessage.Terminate) {
+                terminating.set(true)
+                driver.cancel()
+            }
+            messages.put(message)
+            if (message.getOrNull() !is BombadilMessage.Apply) break
+        }
+    }
     try {
         state(driver.start())
         while (true) {
-            val line = readLine() ?: return
-            if (line.isBlank()) continue
-            when (val message = BombadilMessage.parse(line)) {
+            when (val message = messages.take().getOrThrow()) {
                 is BombadilMessage.Apply -> state(driver.apply(message.action))
-                BombadilMessage.Terminate -> return
+                BombadilMessage.Terminate, null -> return
             }
         }
     } catch (error: Exception) {
+        if (terminating.get()) return
+
         send(buildJsonObject {
             put("type", "error")
             put("message", JsonPrimitive(error.toString()))

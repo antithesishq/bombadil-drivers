@@ -81,6 +81,26 @@ class DriverTest {
     }
 
     @Test
+    fun terminateCancelsTheActionInProgress() {
+        val cancelled = java.util.concurrent.CountDownLatch(1)
+        val fake = FakeDriver()
+        val driver = object : BombadilDriver by fake {
+            override fun apply(action: JsonElement): JsonElement {
+                // Stands in for a slow action that cancelling aborts.
+                check(cancelled.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "not cancelled" }
+                error("aborted")
+            }
+
+            override fun cancel() = cancelled.countDown()
+        }
+        val output = mutableListOf<String>()
+        session(driver, listOf("""{"type":"apply","action":"Slow"}""", """{"type":"terminate"}"""), output)
+        // The aborted action is no error: Bombadil asked to stop.
+        assertEquals(listOf("hello", "state"), output.map { Json.parseToJsonElement(it).jsonObject["type"]!!.jsonPrimitive.content })
+        assertTrue(fake.stopped)
+    }
+
+    @Test
     fun reportsDriverErrorsToBombadilAndStopsTheApp() {
         val driver = FakeDriver()
         val output = mutableListOf<String>()
