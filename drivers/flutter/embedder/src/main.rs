@@ -30,16 +30,15 @@ use std::process;
 
 use serde_json::{json, Value};
 
-use engine::{millis, now, Host, Options};
+use engine::{millis, now, FrameClock, Host, Options};
 
 const USAGE: &str = "\
 usage: bombadil-flutter-driver --assets <flutter_assets> --icu-data <icudtl.dat>
          [--size <width>x<height>] [--fonts <dir>] [--name <name>]
-         [--stall-timeout-ms <ms>]
+         [--stall-timeout-ms <ms>] [--frame-clock virtual|real]
+         [--disable-animations] [--quiet-ms <ms>]
          [-- <engine switches>...]";
 
-/// How long the app must stay quiet to count as settled.
-const QUIET_MS: u64 = 300;
 /// How long to wait for the app to settle after an action.
 const SETTLE_CAP_MS: u64 = 5_000;
 /// How long to wait for the app's first semantics tree.
@@ -60,6 +59,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut fonts = None;
     let mut name = "bombadil-flutter-driver".to_string();
     let mut stall_timeout_ms = 60_000;
+    let mut frame_clock = FrameClock::Virtual;
+    let mut disable_animations = false;
+    let mut quiet_ms = 0;
     let mut engine_args = Vec::new();
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -75,6 +77,15 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
                 (width, height) = parsed.ok_or(format!("bad --size {size}"))?;
             }
+            "--frame-clock" => {
+                frame_clock = match value()?.as_str() {
+                    "virtual" => FrameClock::Virtual,
+                    "real" => FrameClock::Real,
+                    other => return Err(format!("bad --frame-clock {other}")),
+                };
+            }
+            "--disable-animations" => disable_animations = true,
+            "--quiet-ms" => quiet_ms = value()?.parse().map_err(|e| format!("{e}"))?,
             "--stall-timeout-ms" => {
                 stall_timeout_ms = value()?.parse().map_err(|e| format!("{e}"))?;
             }
@@ -89,6 +100,9 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             width,
             height,
             engine_args,
+            frame_clock,
+            disable_animations,
+            quiet_ms,
         },
         fonts,
         name,
@@ -178,8 +192,29 @@ fn parse_action(action: &Value) -> Result<Action, String> {
     }
 }
 
+/// Logs where one step's time went (`BOMBADIL_FLUTTER_TIMING=1`): dispatching the
+/// action, the frames the app asked for, its last vsync request and
+/// semantics update, and the wait after them.
+fn log_timing(stats: engine::Stats, dispatched: u64, settled: bool) {
+    let end = now();
+    let ms = |t: u64| t.saturating_sub(stats.since) as f64 / 1e6;
+    let last = stats
+        .last_vsync_request
+        .max(stats.last_semantics)
+        .max(dispatched);
+    eprintln!(
+        "bombadil-flutter-driver timing: dispatch={:.1}ms frames={} last_vsync_request={:.1}ms last_semantics={:.1}ms total={:.1}ms wait_after_last={:.1}ms settled={settled}",
+        ms(dispatched),
+        stats.frames,
+        if stats.last_vsync_request > 0 { ms(stats.last_vsync_request) } else { 0.0 },
+        if stats.last_semantics > 0 { ms(stats.last_semantics) } else { 0.0 },
+        ms(end),
+        (end - last) as f64 / 1e6,
+    );
+}
+
 fn settle(host: &Host) -> bool {
-    host.settle(millis(QUIET_MS), millis(SETTLE_CAP_MS))
+    host.settle(host.quiet, millis(SETTLE_CAP_MS))
 }
 
 fn tap_at(host: &Host, x: f64, y: f64) -> Result<(), String> {
@@ -353,7 +388,8 @@ fn main() {
         host.push_line(None);
     });
 
-    let settled = host.settle(millis(QUIET_MS), millis(STARTUP_CAP_MS));
+    let timing = std::env::var_os("BOMBADIL_FLUTTER_TIMING").is_some();
+    let settled = host.settle(0, millis(STARTUP_CAP_MS));
     if !host.app().tree.has_root() {
         protocol.fail(format!(
             "the app reported no semantics tree within {STARTUP_CAP_MS}ms of starting"
@@ -375,8 +411,13 @@ fn main() {
             Some("apply") => {
                 let raw = &message["action"];
                 let action = parse_action(raw).unwrap_or_else(|e| protocol.fail(e));
+                host.reset_stats();
                 let result = perform(host, &action);
+                let dispatched = now();
                 let settled = settle(host);
+                if timing {
+                    log_timing(host.reset_stats(), dispatched, settled);
+                }
                 let mut last_action = json!({"action": raw, "ok": result.is_ok()});
                 if let Err(error) = result {
                     last_action["error"] = json!(error);
