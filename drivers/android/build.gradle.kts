@@ -31,6 +31,20 @@ sourceSets {
     }
 }
 
+// `bin/bombadil-android`: the adb driver for Android apps.
+val androidStartScripts by tasks.registering(CreateStartScripts::class) {
+    applicationName = "bombadil-android"
+    mainClass.set("me.uzaaft.bombadil.android.AdbAppDriverKt")
+    outputDir = layout.buildDirectory.dir("android-scripts").get().asFile
+    classpath = tasks.startScripts.get().classpath
+}
+
+distributions.main {
+    contents {
+        into("bin") { from(androidStartScripts) }
+    }
+}
+
 tasks.test {
     useJUnitPlatform()
 }

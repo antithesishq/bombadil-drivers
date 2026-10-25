@@ -1,0 +1,70 @@
+package me.uzaaft.bombadil.android
+
+import java.io.File
+import java.nio.channels.FileChannel
+import java.nio.channels.FileLock
+import java.nio.file.StandardOpenOption
+import java.util.concurrent.TimeUnit
+
+/** Runs `adb` against one device. */
+class Adb(val serial: String, private val adb: String = "adb") {
+    /** Runs `adb -s <serial> <args>` and returns its stdout, failing on a nonzero exit. */
+    fun run(vararg args: String, timeoutSeconds: Long = 60): String {
+        val command = listOf(adb, "-s", serial) + args
+        val process = ProcessBuilder(command).redirectError(ProcessBuilder.Redirect.PIPE).start()
+        process.outputStream.close()
+        val stderr = StringBuilder()
+        val stderrReader = Thread { stderr.append(process.errorStream.bufferedReader().readText()) }
+            .apply { start() }
+        val stdout = process.inputStream.bufferedReader().readText()
+        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            error("timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}")
+        }
+        stderrReader.join()
+        check(process.exitValue() == 0) {
+            "`${command.joinToString(" ")}` exited with ${process.exitValue()}: $stderr$stdout".trim()
+        }
+        return stdout
+    }
+
+    /** Runs [command] in the device's shell, without a terminal, and returns its output. */
+    fun shell(command: String, timeoutSeconds: Long = 60) = run("exec-out", command, timeoutSeconds = timeoutSeconds)
+
+    companion object {
+        /**
+         * Claims the first of [serials] that no other process on this host
+         * has claimed, so parallel drivers each get their own device. The
+         * claim lasts until this process exits.
+         */
+        fun claim(serials: List<String>): Adb {
+            val directory = File(System.getProperty("java.io.tmpdir"), "bombadil-adb-locks").apply { mkdirs() }
+            for (serial in serials) {
+                val channel = FileChannel.open(
+                    File(directory, serial).toPath(),
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                )
+                val lock: FileLock? = channel.tryLock()
+                if (lock != null) {
+                    heldLocks += lock
+                    return Adb(serial)
+                }
+                channel.close()
+            }
+            error("all devices are in use by other drivers: ${serials.joinToString()}")
+        }
+
+        private val heldLocks = mutableListOf<FileLock>()
+    }
+}
+
+/**
+ * Quotes [text] for `input text`: single-quoted for the device shell,
+ * with spaces as `%s`. `input text` can only type printable ASCII, so
+ * other characters are dropped.
+ */
+fun inputTextArgument(text: String): String {
+    val typable = text.filter { it in ' '..'~' }.replace(" ", "%s")
+    return "'" + typable.replace("'", "'\\''") + "'"
+}
