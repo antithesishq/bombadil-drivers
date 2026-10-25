@@ -1,0 +1,9 @@
+# Shared settings for the Now in Android experiment. Sourced by setup.sh
+# and driver.sh.
+NIA_COMMIT=2982e63cb691ad49cd009aab43dc206fee6699c2
+NIA_DIR=${NIA_DIR:-$HOME/repositories/github.com/android/nowinandroid}
+NIA_APK=$NIA_DIR/app/build/outputs/apk/demo/debug/app-demo-debug.apk
+NIA_PACKAGE=com.google.samples.apps.nowinandroid.demo.debug
+export ANDROID_AVD_HOME=${ANDROID_AVD_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/bombadil-compose/avd}
+AVD_NAME=nia35
+AVD_IMAGE="system-images;android-35;default;x86_64"
