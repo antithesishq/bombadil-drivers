@@ -5,75 +5,43 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
+import kotlinx.serialization.json.long
 import me.uzaaft.bombadil.BombadilDriver
 import me.uzaaft.bombadil.runDriver
-
-/** What the device shows: the focused window and the visible UI tree. */
-data class Screen(
-    /** Package of the focused app, or null if none. */
-    val packageName: String?,
-    /** Class of the focused app's activity, or null if none. */
-    val activity: String?,
-    /** Title of the focused window, e.g. `Application Error: <package>` for a crash dialog. */
-    val focus: String?,
-    val nodes: List<UiNode>,
-) {
-    fun toJson(lastAction: JsonElement): JsonElement = buildJsonObject {
-        put("package", packageName)
-        put("activity", activity)
-        put("focus", focus)
-        put("lastAction", lastAction)
-        put("nodes", JsonArray(nodes.map { it.toJson() }))
-    }
-
-    companion object {
-        private val focusPattern = Regex("""mCurrentFocus=Window\{\S+ \S+ ([^}]*)}""")
-        private val appPattern = Regex("""mFocusedApp=ActivityRecord\{\S+ \S+ ([^/\s]+)/(\S+)""")
-
-        /** Parses a `uiautomator dump` followed by `dumpsys window` output. */
-        fun parse(output: String): Screen {
-            val tail = output.substringAfterLast("</hierarchy>")
-            val app = appPattern.find(tail)
-            return Screen(
-                packageName = app?.groupValues?.get(1),
-                activity = app?.groupValues?.get(2)?.let { if (it.startsWith(".")) app.groupValues[1] + it else it },
-                focus = focusPattern.find(tail)?.groupValues?.get(1),
-                nodes = UiNode.parseDump(output).flatMap { it.prune() },
-            )
-        }
-    }
-}
+import java.io.File
 
 /**
- * Drives an installed Android app over adb: the state is the focused
- * window and the visible UI tree, and actions are taps, text input,
- * swipes and key presses.
+ * Drives an installed Android app over adb, through the on-device helper
+ * ([AndroidHelper]): the state is the focused window and the
+ * accessibility tree of every interactive window, and actions are
+ * accessibility actions on nodes (falling back to injected touches), text
+ * input, swipes and global actions.
  *
- * Each session clears the app's data, launches it fresh, and reports
- * states once two consecutive UI dumps agree.
+ * Each session clears the app's data and launches it fresh, and reports
+ * each state once two trees fetched [quietMs] after the last accessibility
+ * event agree.
  *
  * Actions, externally tagged:
- * - `{"Tap": selector}` taps the centre of the node [selector] picks; see [select].
+ * - `{"Tap": selector}` clicks the node [selector] picks; see [select].
  * - `{"Tap": {"x": x, "y": y}}` taps a point.
- * - `{"LongPress": selector}` long-presses a node.
- * - `{"TypeText": {"text": "...", "into": selector}}` types into the
- *   focused field, after tapping the `into` node if given.
- * - `{"Scroll": {"direction": "up"|"down"|"left"|"right", "percent": 1..100}}`
- *   swipes so the content moves the given share of the node picked by
- *   the other selector fields (or of the largest scrollable node, or of
- *   the screen) in that direction.
+ * - `{"LongPress": selector}` long-clicks a node.
+ * - `{"TypeText": {"text": "...", "into": selector}}` appends to the
+ *   focused text field, or the `into` node if given.
+ * - `{"Scroll": {"direction": "up"|"down"|"left"|"right", ...selector}}`
+ *   scrolls the node one step (the largest scrollable node of the app's
+ *   windows if there's no selector); with `"percent": 1..100` it drags
+ *   that share of the node instead.
  * - `{"Swipe": {"from": [x, y], "to": [x, y]}}`.
  * - `"Back"`, `"Home"`, `"Enter"`.
  *
- * A selector that matches nothing leaves the app alone, since replayed
- * or shrunk traces may refer to nodes that are no longer there.
+ * An action on a node that isn't there leaves the app alone, since
+ * replayed or shrunk traces may refer to nodes that are gone.
  */
 class AdbAppDriver(
     private val adb: Adb,
@@ -82,13 +50,21 @@ class AdbAppDriver(
     private val apk: String? = null,
     /** Permissions granted before launching, so their prompts don't block the app. */
     private val permissions: List<String> = emptyList(),
-    /** Dumps per settle at most; the last one wins if no two agree. */
-    private val maxDumps: Int = 4,
+    /**
+     * How long the app must go without an accessibility event before the
+     * driver fetches the tree; it does so until two trees in a row agree.
+     */
+    private val quietMs: Long = 200,
+    /** How long to wait for that at most, for apps that never settle. */
+    private val settleTimeoutMs: Long = 10_000,
+    /** A file to append each step's timings to, as JSON lines. */
+    private val timingLog: File? = null,
     override val stallTimeoutMs: Long? = 120_000,
 ) : BombadilDriver {
     override val name = "android-adb ($packageName on ${adb.serial})"
 
-    private var screen: Screen? = null
+    private val helper = AndroidHelper(adb)
+    private var state: JsonObject? = null
 
     override fun start(): JsonElement {
         adb.run("wait-for-device", timeoutSeconds = 60)
@@ -103,137 +79,160 @@ class AdbAppDriver(
         val activity = adb.shell("cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $packageName")
             .lines().map { it.trim() }.lastOrNull { it.startsWith("$packageName/") }
             ?: error("$packageName has no launcher activity; is it installed?")
+        helper.connect()
+        val started = System.nanoTime()
         adb.shell("am start -W -n $activity")
-        return settle(JsonNull)
+        return settle(JsonNull, started)
     }
 
     override fun apply(action: JsonElement): JsonElement {
+        val started = System.nanoTime()
         val (tag, args) = when (action) {
             is JsonPrimitive -> action.content to JsonObject(emptyMap())
             is JsonObject -> action.entries.single().let { it.key to it.value.jsonObject }
             else -> error("not an action: $action")
         }
-        when (tag) {
-            "Tap" -> point(args)?.let { (x, y) -> adb.shell("input tap $x $y") }
-            "LongPress" -> point(args)?.let { (x, y) -> adb.shell("input swipe $x $y $x $y 800") }
+        val result: JsonObject? = when (tag) {
+            "Tap" -> point(args)?.let { (x, y) -> helper.request("tap", "x" to x, "y" to y) }
+                ?: target(args)?.let { helper.request("click", "node" to it) }
+            "LongPress" -> target(args)?.let { helper.request("longClick", "node" to it) }
             "TypeText" -> {
-                args["into"]?.jsonObject?.let { into -> point(into)?.let { (x, y) -> adb.shell("input tap $x $y") } }
-                adb.shell("input text ${inputTextArgument(args.string("text") ?: error("TypeText without text"))}")
+                val into = args["into"]?.jsonObject?.let { target(it) ?: return settle(action, started) }
+                helper.request("setText", "node" to into, "text" to args.string("text"))
             }
             "Scroll" -> scroll(args)
             "Swipe" -> {
                 val (x1, y1) = args.getValue("from").jsonArray.map { it.jsonPrimitive.int }
                 val (x2, y2) = args.getValue("to").jsonArray.map { it.jsonPrimitive.int }
-                adb.shell("input swipe $x1 $y1 $x2 $y2 300")
+                helper.request("swipe", "x1" to x1, "y1" to y1, "x2" to x2, "y2" to y2, "durationMs" to 300)
             }
-            "Back" -> adb.shell("input keyevent KEYCODE_BACK")
-            "Home" -> adb.shell("input keyevent KEYCODE_HOME")
-            "Enter" -> adb.shell("input keyevent KEYCODE_ENTER")
+            "Back" -> helper.request("global", "action" to "back")
+            "Home" -> helper.request("global", "action" to "home")
+            "Enter" -> helper.request("key", "code" to 66)
             else -> error("unknown action `$tag`")
         }
-        return settle(action)
+        if (result != null && result["done"]?.jsonPrimitive?.boolean == false) {
+            log("$action not done: ${result["reason"]?.jsonPrimitive?.content}")
+        }
+        return settle(action, started)
     }
 
-    override fun cancel() = adb.cancel()
+    override fun cancel() {
+        helper.cancel()
+        adb.cancel()
+    }
 
     override fun stop() {
+        helper.close()
         adb.resume()
         runCatching { adb.shell("am force-stop $packageName", timeoutSeconds = 3) }
     }
 
-    private fun scroll(args: JsonObject) {
-        val area = if (args.keys.any { it in selectorKeys }) select(args)?.bounds ?: return
-        else largestScrollable() ?: screenBounds()
-        val share = (args["percent"]?.jsonPrimitive?.intOrNull ?: 50).coerceIn(1, 100) / 100.0
+    private fun scroll(args: JsonObject): JsonObject? {
+        val direction = args.string("direction") ?: "down"
+        val node = if (args.keys.any { it in selectorKeys }) select(args) ?: return null
+        else largestScrollable()
+        val percent = args["percent"]?.jsonPrimitive?.intOrNull
+        if (node != null && percent == null) return helper.request("scroll", "node" to node.id, "direction" to direction)
+        val area = node?.bounds ?: screenBounds()
+        val share = (percent ?: 50).coerceIn(1, 100) / 100.0
         // Keep clear of the area's edges, where system gestures and bars live.
-        val left = area.left + (area.right - area.left) / 10
-        val right = area.right - (area.right - area.left) / 10
-        val top = area.top + (area.bottom - area.top) / 10
-        val bottom = area.bottom - (area.bottom - area.top) / 10
+        val left = area[0] + (area[2] - area[0]) / 10
+        val right = area[2] - (area[2] - area[0]) / 10
+        val top = area[1] + (area[3] - area[1]) / 10
+        val bottom = area[3] - (area[3] - area[1]) / 10
         val dx = ((right - left) * share).toInt()
         val dy = ((bottom - top) * share).toInt()
-        val (cx, cy) = area.centerX to area.centerY
+        val (cx, cy) = (area[0] + area[2]) / 2 to (area[1] + area[3]) / 2
         // Content moves with the finger, so scrolling down drags upwards.
-        val (from, to) = when (args.string("direction") ?: "down") {
+        val (from, to) = when (direction) {
             "down" -> (cx to bottom) to (cx to bottom - dy)
             "up" -> (cx to top) to (cx to top + dy)
             "right" -> (right to cy) to (right - dx to cy)
             "left" -> (left to cy) to (left + dx to cy)
             else -> error("unknown scroll direction in $args")
         }
-        adb.shell("input swipe ${from.first} ${from.second} ${to.first} ${to.second} 400")
+        return helper.request(
+            "swipe", "x1" to from.first, "y1" to from.second, "x2" to to.first, "y2" to to.second, "durationMs" to 400,
+        )
     }
 
-    private fun largestScrollable() =
-        screen?.nodes.orEmpty().asSequence().flatMap { it.flatten() }.filter { it.scrollable }
-            .map { it.bounds }.maxByOrNull { (it.right - it.left).toLong() * (it.bottom - it.top) }
+    /** A node in the last state, flattened. */
+    data class Node(
+        val id: String,
+        val window: JsonObject,
+        val fields: JsonObject,
+    ) {
+        val bounds get() = fields.getValue("bounds").jsonArray.map { it.jsonPrimitive.int }
+        fun field(key: String) = fields[key]?.jsonPrimitive?.content
+    }
 
-    private fun screenBounds() =
-        screen?.nodes?.map { it.bounds }?.reduceOrNull { a, b ->
-            Bounds(minOf(a.left, b.left), minOf(a.top, b.top), maxOf(a.right, b.right), maxOf(a.bottom, b.bottom))
-        } ?: Bounds(0, 0, 1080, 2400)
+    /** Every node of the last state, depth first, windows from top to bottom. */
+    fun nodes(): Sequence<Node> = sequence {
+        for (window in state?.get("windows")?.jsonArray.orEmpty().map { it.jsonObject }) {
+            suspend fun SequenceScope<Node>.walk(nodes: JsonArray) {
+                for (node in nodes.map { it.jsonObject }) {
+                    yield(Node(node.getValue("id").jsonPrimitive.content, window, node))
+                    walk(node.getValue("children").jsonArray)
+                }
+            }
+            walk(window.getValue("nodes").jsonArray)
+        }
+    }
+
+    private fun largestScrollable() = nodes()
+        .filter { it.window["type"]?.jsonPrimitive?.content == "application" && it.field("scrollable") == "true" }
+        .maxByOrNull { val (l, t, r, b) = it.bounds; (r - l).toLong() * (b - t) }
+
+    private fun screenBounds(): List<Int> =
+        state?.get("windows")?.jsonArray?.map { w -> w.jsonObject.getValue("bounds").jsonArray.map { it.jsonPrimitive.int } }
+            ?.reduceOrNull { a, b -> listOf(minOf(a[0], b[0]), minOf(a[1], b[1]), maxOf(a[2], b[2]), maxOf(a[3], b[3])) }
+            ?: listOf(0, 0, 1080, 2400)
 
     private fun point(args: JsonObject): Pair<Int, Int>? {
         val x = args["x"]?.jsonPrimitive?.intOrNull
         val y = args["y"]?.jsonPrimitive?.intOrNull
-        if (x != null && y != null) return x to y
-        val node = select(args) ?: return null
-        return node.bounds.centerX to node.bounds.centerY
+        return if (x != null && y != null) x to y else null
     }
 
+    /** The id of the node [selector] picks: its `node` id, or what [select] finds. */
+    private fun target(selector: JsonObject): String? =
+        selector["node"]?.jsonPrimitive?.content ?: select(selector)?.id
+
     /**
-     * The node in the last reported state whose `resourceId`, `text`,
-     * `desc`, `label` and `class` equal those given (all optional),
-     * taking the `index`th match (default 0) in depth-first order.
+     * The node in the last state whose `resourceId`, `text`, `desc`,
+     * `label` and `class` equal those given (all optional), taking the
+     * `index`th match (default 0) in depth-first order. Prefer the `node`
+     * ids that states report: they don't depend on what else is shown.
      */
-    fun select(selector: JsonObject): UiNode? {
+    fun select(selector: JsonObject): Node? {
         val wanted = selector.filterKeys { it in selectorKeys }.mapValues { it.value.jsonPrimitive.content }
-        val matches = screen?.nodes.orEmpty().asSequence().flatMap { it.flatten() }.filter { node ->
-            wanted.all { (key, value) -> node.field(key) == value }
-        }
+        val matches = nodes().filter { node -> wanted.all { (key, value) -> node.field(key) == value } }
         val node = matches.elementAtOrNull(selector["index"]?.jsonPrimitive?.intOrNull ?: 0)
-        if (node == null) System.err.println("[$name] no node matches $selector; skipping")
+        if (node == null) log("no node matches $selector; skipping")
         return node
     }
 
-    private fun UiNode.field(key: String) = when (key) {
-        "resourceId" -> resourceId
-        "text" -> text
-        "desc" -> desc
-        "label" -> label
-        "class" -> className.substringAfterLast('.')
-        else -> null
-    }
-
-    /** Dumps until two consecutive dumps agree, or [maxDumps] times. */
-    private fun settle(lastAction: JsonElement): JsonElement {
-        var previous: Screen? = null
-        for (attempt in 1..maxDumps) {
-            val current = dump()
-            if (current == previous) break
-            previous = current
+    /** Waits for the app to settle and returns its state, recording how long each part took. */
+    private fun settle(lastAction: JsonElement, started: Long): JsonElement {
+        val acted = System.nanoTime()
+        val settled = helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
+        val fetched = System.nanoTime()
+        if (settled["stable"]?.jsonPrimitive?.boolean == false) log("the UI didn't settle within ${settleTimeoutMs}ms")
+        val fresh = settled.getValue("state").jsonObject
+        state = fresh
+        timingLog?.let { log ->
+            fun field(key: String) = settled.getValue(key).jsonPrimitive.content
+            val rttMs = (fetched - acted) / 1_000_000.0
+            log.appendText(
+                "{\"actionMs\":${(acted - started) / 1_000_000.0},\"settleMs\":$rttMs,\"trees\":${field("trees")}," +
+                    "\"idleMs\":${field("idleMs")},\"buildMs\":${field("buildMs")}," +
+                    // Time on the host side of the request: transfer, plus parsing on the host.
+                    "\"transferMs\":${rttMs - field("ms").toDouble()},\"parseMs\":${helper.lastParseMs}," +
+                    "\"bytes\":${helper.lastResponseBytes},\"totalMs\":${(System.nanoTime() - started) / 1_000_000.0}}\n",
+            )
         }
-        screen = previous
-        return previous!!.toJson(lastAction)
-    }
-
-    private fun dump(): Screen {
-        var failure: Exception? = null
-        repeat(3) {
-            try {
-                return Screen.parse(
-                    adb.shell(
-                        "uiautomator dump /dev/tty; echo; dumpsys window | grep -E 'mCurrentFocus|mFocusedApp'",
-                        timeoutSeconds = 20,
-                    ),
-                )
-            } catch (e: Exception) {
-                // `uiautomator dump` fails now and then, e.g. "could not get idle state".
-                failure = e
-                Thread.sleep(300)
-            }
-        }
-        throw IllegalStateException("UI dump failed", failure)
+        return JsonObject(fresh + ("lastAction" to lastAction))
     }
 
     private fun waitUntil(timeoutMs: Long, what: String, condition: () -> Boolean) {
@@ -243,6 +242,8 @@ class AdbAppDriver(
             Thread.sleep(500)
         }
     }
+
+    private fun log(message: String) = System.err.println("[$name] $message")
 
     private fun JsonObject.string(key: String) = this[key]?.jsonPrimitive?.content
 
@@ -261,7 +262,8 @@ class AdbAppDriver(
  * The device is the first serial in `BOMBADIL_ANDROID_SERIALS`
  * (comma-separated) that no other driver on this host is using, so
  * parallel fuzzing workers each get their own emulator; it defaults to
- * `ANDROID_SERIAL`, then `emulator-5554`.
+ * `ANDROID_SERIAL`, then `emulator-5554`. `BOMBADIL_ANDROID_TIMINGS`
+ * names a file to append each step's timings to.
  */
 fun main(args: Array<String>) {
     var packageName: String? = null
@@ -284,6 +286,7 @@ fun main(args: Array<String>) {
             packageName ?: error("--package is required"),
             apk,
             permissions,
+            timingLog = System.getenv("BOMBADIL_ANDROID_TIMINGS")?.let(::File),
         ),
     )
 }

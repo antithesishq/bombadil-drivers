@@ -9,12 +9,15 @@ import { extract } from "@antithesishq/bombadil/external";
 export { nowInAndroid } from "./spec.ts";
 
 type Node = { label: string; children: Node[] };
+type Window = { type: string; nodes: Node[] };
 
 const shows = (nodes: Node[], label: string): boolean =>
   nodes.some((n) => n.label === label || shows(n.children, label));
 
-const followingAnInterest = extract((s: { nodes: Node[] }) =>
-  shows(s.nodes, "Unfollow interest"),
+const followingAnInterest = extract((s: { windows: Window[] }) =>
+  s.windows.some(
+    (w) => w.type === "application" && shows(w.nodes, "Unfollow interest"),
+  ),
 );
 
 export const noInterestIsEverFollowed = always(

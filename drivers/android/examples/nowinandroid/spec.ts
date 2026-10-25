@@ -4,13 +4,13 @@ import { always, next } from "@antithesishq/bombadil";
 import {
   actions,
   extract,
-  integer,
   string,
   weighted,
 } from "@antithesishq/bombadil/external";
 
 /** A node as the adb driver reports it. */
 type Node = {
+  id: string;
   resourceId: string;
   class: string;
   text: string;
@@ -22,8 +22,17 @@ type Node = {
   checked: boolean;
   selected: boolean;
   focused: boolean;
+  editable: boolean;
   bounds: number[];
   children: Node[];
+};
+
+type Window = {
+  type: string;
+  package: string;
+  title: string;
+  active: boolean;
+  nodes: Node[];
 };
 
 type State = {
@@ -31,17 +40,17 @@ type State = {
   activity: string | null;
   focus: string | null;
   lastAction: unknown;
-  nodes: Node[];
+  windows: Window[];
 };
 
 const APP = "com.google.samples.apps.nowinandroid.demo.debug";
 // Tapping a news item opens its article in the system browser.
 const BROWSER = "org.chromium.webview_shell";
 const TOP_LEVEL = ["For you", "Saved", "Interests"];
+const CRASH_OR_ANR = /keeps stopping|has stopped|isn.t responding/;
 
 type Flat = Omit<Node, "children" | "text" | "desc" | "bounds">;
 
-/** All nodes depth first, in the order the driver matches selectors. */
 function flatten(nodes: Node[], into: Flat[] = []): Flat[] {
   for (const { children, text, desc, bounds, ...node } of nodes) {
     into.push(node);
@@ -50,15 +59,30 @@ function flatten(nodes: Node[], into: Flat[] = []): Flat[] {
   return into;
 }
 
+/** Nodes of the app's own windows (not the status bar, keyboard, ...). */
+const appNodes = (s: State) =>
+  flatten(
+    s.windows
+      .filter((w) => w.type === "application" && w.package === APP)
+      .flatMap((w) => w.nodes),
+  );
+
 const pkg = extract((s: State) => s.package);
-const focus = extract((s: State) => s.focus ?? "");
 const lastAction = extract((s: State) => JSON.stringify(s.lastAction));
-const nodes = extract((s: State) => flatten(s.nodes));
+const nodes = extract(appNodes);
+/** Window titles and labels anywhere on screen that read like a crash or ANR dialog. */
+const crashOrAnr = extract((s: State) =>
+  s.windows.flatMap((w) =>
+    [w.title, ...flatten(w.nodes).map((n) => n.label)].filter((l) =>
+      CRASH_OR_ANR.test(l),
+    ),
+  ),
+);
 /** The topic detail screen being shown, if any (its root is tagged `topic:<id>`). */
 const topic = extract(
   (s: State) =>
-    flatten(s.nodes).find((n) => n.resourceId.startsWith("topic:"))
-      ?.resourceId ?? null,
+    appNodes(s).find((n) => n.resourceId.startsWith("topic:"))?.resourceId ??
+    null,
 );
 
 const inApp = () => pkg.current === APP;
@@ -78,11 +102,7 @@ export const appInForeground = always(
 );
 
 /** No "keeps stopping" or "isn't responding" dialog ever shows. */
-export const noCrashOrAnrDialog = always(
-  () =>
-    !/^Application (Error|Not Responding)/.test(focus.current) &&
-    !nodes.current.some((n) => /keeps stopping|isn.t responding/.test(n.label)),
-);
+export const noCrashOrAnrDialog = always(() => crashOrAnr.current.length === 0);
 
 /** Every top-level screen shows the whole bottom navigation. */
 export const bottomNavigationOnTopLevelScreens = always(
@@ -96,36 +116,36 @@ export const backLeavesTopicScreen = always(() => {
   return next(() => lastAction.current !== '"Back"' || topic.current !== shown);
 });
 
-// Actions
+// Actions. Nodes are addressed by the ids the driver reports, which don't
+// depend on what else is on screen; labels are there for reading traces.
 
-/** Taps one of the visible, enabled, clickable nodes. */
-const tap = actions(() => {
-  if (!inApp()) return [];
-  const seen = new Map<string, number>();
-  const taps = [];
-  for (const n of nodes.current) {
-    const key = JSON.stringify([n.label, n.resourceId]);
-    const index = seen.get(key) ?? 0;
-    seen.set(key, index + 1);
-    if (n.clickable && n.enabled) {
-      taps.push({ Tap: { label: n.label, resourceId: n.resourceId, index } });
-    }
-  }
-  return taps;
-});
+const short = (label: string) => label.slice(0, 40);
 
+/** Taps one of the app's visible, enabled, clickable nodes. */
+const tap = actions(() =>
+  inApp()
+    ? nodes.current
+        .filter((n) => n.clickable && n.enabled)
+        .map((n) => ({ Tap: { node: n.id, label: short(n.label) } }))
+    : [],
+);
+
+/** Scrolls one of the app's scrollable nodes a step. */
 const scroll = actions(() =>
   inApp()
-    ? [
-        { Scroll: { direction: "down", percent: integer([20, 80]) } },
-        { Scroll: { direction: "up", percent: integer([20, 80]) } },
-      ]
+    ? nodes.current
+        .filter((n) => n.scrollable)
+        .flatMap((n) =>
+          ["down", "up"].map((direction) => ({
+            Scroll: { node: n.id, direction, label: short(n.label) },
+          })),
+        )
     : [],
 );
 
 /** Types into the search field when it's focused. */
 const typeText = actions(() =>
-  inApp() && nodes.current.some((n) => n.focused && n.class === "EditText")
+  inApp() && nodes.current.some((n) => n.focused && n.editable)
     ? [{ TypeText: { text: string({ Regexp: "[a-z]{1,8}( [a-z]{1,8})?" }) } }]
     : [],
 );

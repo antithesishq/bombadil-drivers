@@ -76,12 +76,3 @@ class Adb(val serial: String, private val adb: String = "adb") {
     }
 }
 
-/**
- * Quotes [text] for `input text`: single-quoted for the device shell,
- * with spaces as `%s`. `input text` can only type printable ASCII, so
- * other characters are dropped.
- */
-fun inputTextArgument(text: String): String {
-    val typable = text.filter { it in ' '..'~' }.replace(" ", "%s")
-    return "'" + typable.replace("'", "'\\''") + "'"
-}
