@@ -62,6 +62,20 @@ final class DriverTests: XCTestCase {
         XCTAssertTrue(driver.stopped)
     }
 
+    func testAnnouncesTheStallTimeoutInTheHello() {
+        final class SlowDriver: BombadilDriver {
+            let name = "slow"
+            let stallTimeoutMs: Int? = 90_000
+            func start() throws -> JSONValue { nil }
+            func apply(_ action: JSONValue) throws -> JSONValue { nil }
+            func stop() {}
+        }
+        let (output, error) = session(SlowDriver(), [#"{"type":"terminate"}"#])
+        XCTAssertNil(error)
+        XCTAssertEqual(
+            output.first, #"{"name":"slow","protocol":0,"stall_timeout_ms":90000,"type":"hello"}"#)
+    }
+
     func testDecodesIntegersAsIntegers() throws {
         let action = try JSONDecoder().decode(JSONValue.self, from: Data(#"{"by":2,"x":0.5}"#.utf8))
         XCTAssertEqual(action, ["by": .int(2), "x": .double(0.5)])

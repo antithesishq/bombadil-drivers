@@ -3,21 +3,25 @@ public let protocolVersion = 0
 
 /// Messages the driver sends to Bombadil.
 public enum DriverMessage: Equatable, Encodable {
-    case hello(name: String)
+    /// `stallTimeoutMs`, if set, replaces Bombadil's default stall timeout
+    /// (30 seconds) for every `state`, the first included.
+    case hello(name: String, stallTimeoutMs: Int? = nil)
     case state(JSONValue)
     case error(message: String)
 
     private enum CodingKeys: String, CodingKey {
         case type, `protocol`, name, state, message
+        case stallTimeoutMs = "stall_timeout_ms"
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .hello(let name):
+        case .hello(let name, let stallTimeoutMs):
             try container.encode("hello", forKey: .type)
             try container.encode(protocolVersion, forKey: .protocol)
             try container.encode(name, forKey: .name)
+            try container.encodeIfPresent(stallTimeoutMs, forKey: .stallTimeoutMs)
         case .state(let state):
             try container.encode("state", forKey: .type)
             try container.encode(state, forKey: .state)

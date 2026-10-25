@@ -8,6 +8,11 @@ public protocol BombadilDriver: AnyObject {
     /// Name reported to Bombadil in the handshake.
     var name: String { get }
 
+    /// How long Bombadil waits for each state, the first included, before
+    /// it considers the driver stalled. `nil` keeps Bombadil's default of
+    /// 30 seconds.
+    var stallTimeoutMs: Int? { get }
+
     /// Launches the app and returns its first settled state.
     func start() throws -> JSONValue
 
@@ -16,6 +21,10 @@ public protocol BombadilDriver: AnyObject {
 
     /// Shuts the app down.
     func stop()
+}
+
+extension BombadilDriver {
+    public var stallTimeoutMs: Int? { nil }
 }
 
 /// Runs `driver` for one Bombadil session, reading Bombadil's messages
@@ -38,7 +47,7 @@ public func runDriver(
         writeLine(String(decoding: try encoder.encode(message), as: UTF8.self))
     }
 
-    try send(.hello(name: driver.name))
+    try send(.hello(name: driver.name, stallTimeoutMs: driver.stallTimeoutMs))
     defer { driver.stop() }
     do {
         try send(.state(driver.start()))
