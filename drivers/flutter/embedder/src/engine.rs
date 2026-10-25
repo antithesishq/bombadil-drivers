@@ -106,7 +106,9 @@ fn lossy(text: *const c_char) -> String {
     if text.is_null() {
         String::new()
     } else {
-        unsafe { CStr::from_ptr(text) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -161,7 +163,11 @@ impl Host {
         let icu_data = CString::new(options.icu_data).map_err(|e| e.to_string())?;
         // The engine skips argv[0].
         let args = strings(
-            &[vec!["bombadil-flutter-driver".to_string()], options.engine_args].concat(),
+            &[
+                vec!["bombadil-flutter-driver".to_string()],
+                options.engine_args,
+            ]
+            .concat(),
         );
         let argv: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
         let log_tag = CString::new("flutter").unwrap();
@@ -282,7 +288,11 @@ impl Host {
                     self.engine(),
                     node as u64,
                     action as FlutterSemanticsAction,
-                    if data.is_empty() { ptr::null() } else { data.as_ptr() },
+                    if data.is_empty() {
+                        ptr::null()
+                    } else {
+                        data.as_ptr()
+                    },
                     data.len(),
                 )
             },
@@ -398,7 +408,11 @@ impl Host {
             if now >= start + cap {
                 return false;
             }
-            self.pump_through((last_activity + quiet).max(now + millis(10)).min(start + cap));
+            self.pump_through(
+                (last_activity + quiet)
+                    .max(now + millis(10))
+                    .min(start + cap),
+            );
         }
     }
 
@@ -472,7 +486,11 @@ extern "C" fn platform_message(message: *const FlutterPlatformMessage, user_data
             FlutterEngineSendPlatformMessageResponse(
                 host.engine(),
                 message.response_handle,
-                if reply.is_empty() { ptr::null() } else { reply.as_ptr() },
+                if reply.is_empty() {
+                    ptr::null()
+                } else {
+                    reply.as_ptr()
+                },
                 reply.len(),
             )
         };
@@ -514,7 +532,10 @@ fn flags(flags: &FlutterSemanticsFlags) -> Vec<&'static str> {
     for (set, name) in [
         (flags.is_button, "button"),
         (flags.is_text_field, "textField"),
-        (flags.is_in_mutually_exclusive_group, "inMutuallyExclusiveGroup"),
+        (
+            flags.is_in_mutually_exclusive_group,
+            "inMutuallyExclusiveGroup",
+        ),
         (flags.is_header, "header"),
         (flags.is_obscured, "obscured"),
         (flags.scopes_route, "scopesRoute"),
@@ -540,16 +561,45 @@ fn flags(flags: &FlutterSemanticsFlags) -> Vec<&'static str> {
 /// `flags2`.
 fn deprecated_flags(bits: u32) -> Vec<&'static str> {
     let has = |bit: u32| bits & bit != 0;
-    let pick = |has_state: u32, set: u32, yes, no| {
-        has(has_state).then(|| if has(set) { yes } else { no })
-    };
+    let pick =
+        |has_state: u32, set: u32, yes, no| has(has_state).then(|| if has(set) { yes } else { no });
     let mut out: Vec<&'static str> = [
-        pick(kFlutterSemanticsFlagHasCheckedState, kFlutterSemanticsFlagIsChecked, "checked", "unchecked"),
-        pick(kFlutterSemanticsFlagHasSelectedState, kFlutterSemanticsFlagIsSelected, "selected", "unselected"),
-        pick(kFlutterSemanticsFlagHasEnabledState, kFlutterSemanticsFlagIsEnabled, "enabled", "disabled"),
-        pick(kFlutterSemanticsFlagHasToggledState, kFlutterSemanticsFlagIsToggled, "toggled", "untoggled"),
-        pick(kFlutterSemanticsFlagHasExpandedState, kFlutterSemanticsFlagIsExpanded, "expanded", "collapsed"),
-        pick(kFlutterSemanticsFlagIsFocusable, kFlutterSemanticsFlagIsFocused, "focused", "focusable"),
+        pick(
+            kFlutterSemanticsFlagHasCheckedState,
+            kFlutterSemanticsFlagIsChecked,
+            "checked",
+            "unchecked",
+        ),
+        pick(
+            kFlutterSemanticsFlagHasSelectedState,
+            kFlutterSemanticsFlagIsSelected,
+            "selected",
+            "unselected",
+        ),
+        pick(
+            kFlutterSemanticsFlagHasEnabledState,
+            kFlutterSemanticsFlagIsEnabled,
+            "enabled",
+            "disabled",
+        ),
+        pick(
+            kFlutterSemanticsFlagHasToggledState,
+            kFlutterSemanticsFlagIsToggled,
+            "toggled",
+            "untoggled",
+        ),
+        pick(
+            kFlutterSemanticsFlagHasExpandedState,
+            kFlutterSemanticsFlagIsExpanded,
+            "expanded",
+            "collapsed",
+        ),
+        pick(
+            kFlutterSemanticsFlagIsFocusable,
+            kFlutterSemanticsFlagIsFocused,
+            "focused",
+            "focusable",
+        ),
     ]
     .into_iter()
     .flatten()
@@ -608,7 +658,12 @@ extern "C" fn update_semantics(update: *const FlutterSemanticsUpdate2, user_data
                     flags(unsafe { &*node.flags2 })
                 },
                 actions: node.actions as u64,
-                rect: [node.rect.left, node.rect.top, node.rect.right, node.rect.bottom],
+                rect: [
+                    node.rect.left,
+                    node.rect.top,
+                    node.rect.right,
+                    node.rect.bottom,
+                ],
                 transform: transform(&node.transform),
                 children: unsafe { slice(node.children_in_traversal_order, node.child_count) }
                     .to_vec(),
@@ -618,7 +673,10 @@ extern "C" fn update_semantics(update: *const FlutterSemanticsUpdate2, user_data
                     node.scroll_extent_max,
                 ]),
                 custom_actions: unsafe {
-                    slice(node.custom_accessibility_actions, node.custom_accessibility_actions_count)
+                    slice(
+                        node.custom_accessibility_actions,
+                        node.custom_accessibility_actions_count,
+                    )
                 }
                 .to_vec(),
             }

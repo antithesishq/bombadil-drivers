@@ -196,7 +196,10 @@ mod tests {
         assert_eq!(platform.handle("flutter/mousecursor", &call), [0, 0]);
         assert_eq!(platform.handle("flutter/accessibility", &[13, 0]), [0u8; 0]);
         assert_eq!(
-            platform.handle("dev.flutter.pigeon.url_launcher_linux.UrlLauncherApi.launchUrl", &[12, 1, 0]),
+            platform.handle(
+                "dev.flutter.pigeon.url_launcher_linux.UrlLauncherApi.launchUrl",
+                &[12, 1, 0]
+            ),
             [12, 1, 0]
         );
     }

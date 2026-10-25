@@ -27,11 +27,25 @@
           hash = "sha256-84P3zZEJ6VJx4KSc0/ehWVBXHUpH1aG7PJR8/tLMFtE=";
           stripRoot = false;
         };
+
+      # Fonts for the driver's `--fonts`, one directory per family: the
+      # engine only looks for system fonts in /usr/share/fonts. Roboto is
+      # Material's font on Linux, DejaVu Sans the engine's fallback.
+      fonts =
+        pkgs:
+        pkgs.runCommand "bombadil-flutter-fonts" { } ''
+          mkdir -p $out/Roboto "$out/DejaVu Sans"
+          ln -s ${pkgs.roboto}/share/fonts/truetype/Roboto-*.ttf $out/Roboto/
+          ln -s ${pkgs.dejavu_fonts}/share/fonts/truetype/DejaVuSans{,-Bold,-Oblique,-BoldOblique}.ttf "$out/DejaVu Sans/"
+        '';
     in
     {
       packages = forAllSystems (
         pkgs:
-        nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
+        {
+          fonts = fonts pkgs;
+        }
+        // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
           flutter-embedder = flutterEmbedder pkgs;
         }
       );
@@ -52,6 +66,8 @@
             ];
             # For bindgen.
             LIBCLANG_PATH = "${pkgs.libclang.lib}/lib";
+            # For the driver's --fonts.
+            BOMBADIL_FLUTTER_FONTS = fonts pkgs;
           }
           // nixpkgs.lib.optionalAttrs (pkgs.stdenv.hostPlatform.system == "x86_64-linux") {
             # Read by embedder/build.rs.

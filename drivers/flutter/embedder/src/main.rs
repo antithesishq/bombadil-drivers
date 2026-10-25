@@ -8,6 +8,7 @@
 
 mod channels;
 mod engine;
+mod fonts;
 mod logs;
 mod semantics;
 
@@ -24,6 +25,7 @@ mod ffi {
 
 use std::fs::File;
 use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use serde_json::{json, Value};
@@ -32,7 +34,8 @@ use engine::{millis, now, Host, Options};
 
 const USAGE: &str = "\
 usage: bombadil-flutter-driver --assets <flutter_assets> --icu-data <icudtl.dat>
-         [--size <width>x<height>] [--name <name>] [--stall-timeout-ms <ms>]
+         [--size <width>x<height>] [--fonts <dir>] [--name <name>]
+         [--stall-timeout-ms <ms>]
          [-- <engine switches>...]";
 
 /// How long the app must stay quiet to count as settled.
@@ -44,6 +47,8 @@ const STARTUP_CAP_MS: u64 = 45_000;
 
 struct Args {
     options: Options,
+    /// Font families to add to the app's, one subdirectory each.
+    fonts: Option<String>,
     name: String,
     stall_timeout_ms: u64,
 }
@@ -52,6 +57,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut assets = None;
     let mut icu_data = None;
     let (mut width, mut height) = (1024, 768);
+    let mut fonts = None;
     let mut name = "bombadil-flutter-driver".to_string();
     let mut stall_timeout_ms = 60_000;
     let mut engine_args = Vec::new();
@@ -60,6 +66,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         match arg.as_str() {
             "--assets" => assets = Some(value()?),
             "--icu-data" => icu_data = Some(value()?),
+            "--fonts" => fonts = Some(value()?),
             "--name" => name = value()?,
             "--size" => {
                 let size = value()?;
@@ -83,6 +90,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             height,
             engine_args,
         },
+        fonts,
         name,
         stall_timeout_ms,
     })
@@ -92,10 +100,22 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 #[derive(Debug, PartialEq)]
 enum Action {
     /// A semantics action without arguments, by name, on a node.
-    Semantics { node: i32, action: &'static str },
-    SetText { node: i32, text: String },
-    Custom { node: i32, id: i32 },
-    PointerTap { x: f64, y: f64 },
+    Semantics {
+        node: i32,
+        action: &'static str,
+    },
+    SetText {
+        node: i32,
+        text: String,
+    },
+    Custom {
+        node: i32,
+        id: i32,
+    },
+    PointerTap {
+        x: f64,
+        y: f64,
+    },
     Back,
 }
 
@@ -122,7 +142,10 @@ fn parse_action(action: &Value) -> Result<Action, String> {
     if action == "Back" {
         return Ok(Action::Back);
     }
-    let Some((tag, body)) = action.as_object().filter(|o| o.len() == 1).and_then(|o| o.iter().next())
+    let Some((tag, body)) = action
+        .as_object()
+        .filter(|o| o.len() == 1)
+        .and_then(|o| o.iter().next())
     else {
         return Err(bad());
     };
@@ -133,7 +156,10 @@ fn parse_action(action: &Value) -> Result<Action, String> {
             .ok_or_else(|| format!("{tag} needs a node: {action}"))
     };
     if let Some((_, name)) = SEMANTICS_ACTIONS.iter().find(|(t, _)| t == tag) {
-        return Ok(Action::Semantics { node: node()?, action: name });
+        return Ok(Action::Semantics {
+            node: node()?,
+            action: name,
+        });
     }
     match tag.as_str() {
         "SetText" => Ok(Action::SetText {
@@ -200,7 +226,11 @@ fn perform(host: &Host, action: &Action) -> Result<(), String> {
             // Text fields take text once focused.
             if !supports(host, *node, "setText")? {
                 if supports(host, *node, "tap")? {
-                    host.dispatch_semantics_action(*node, semantics::action_bit("tap").unwrap(), &[])?;
+                    host.dispatch_semantics_action(
+                        *node,
+                        semantics::action_bit("tap").unwrap(),
+                        &[],
+                    )?;
                 } else if let Some((x, y)) = visible_centre(host, *node) {
                     tap_at(host, x, y)?;
                 }
@@ -213,18 +243,19 @@ fn perform(host: &Host, action: &Action) -> Result<(), String> {
                     &channels::standard_string(text),
                 )
             } else if let Some(client) = host.app().platform.text_client {
-                host.send("flutter/textinput", &channels::update_editing_state(client, text))
+                host.send(
+                    "flutter/textinput",
+                    &channels::update_editing_state(client, text),
+                )
             } else {
                 Err(format!("node {node} doesn't take text"))
             }
         }
-        Action::Custom { node, id } => {
-            host.dispatch_semantics_action(
-                *node,
-                semantics::action_bit("customAction").unwrap(),
-                &channels::standard_int(*id),
-            )
-        }
+        Action::Custom { node, id } => host.dispatch_semantics_action(
+            *node,
+            semantics::action_bit("customAction").unwrap(),
+            &channels::standard_int(*id),
+        ),
         Action::PointerTap { x, y } => tap_at(host, *x, *y),
         Action::Back => host.send(
             "flutter/navigation",
@@ -249,39 +280,66 @@ fn state(host: &Host, settled: bool, last_action: Option<Value>) -> Value {
     state
 }
 
-struct Protocol(File);
+struct Protocol {
+    out: File,
+    /// A directory to delete on exit.
+    scratch: Option<PathBuf>,
+}
 
 impl Protocol {
     fn send(&mut self, message: Value) {
         let line = format!("{message}\n");
-        if self.0.write_all(line.as_bytes()).and_then(|_| self.0.flush()).is_err() {
+        if self
+            .out
+            .write_all(line.as_bytes())
+            .and_then(|_| self.out.flush())
+            .is_err()
+        {
             // Bombadil has gone.
-            process::exit(1);
+            self.exit(1);
         }
     }
 
     fn fail(&mut self, message: String) -> ! {
         eprintln!("bombadil-flutter-driver: {message}");
         self.send(json!({"type": "error", "message": message}));
-        process::exit(1);
+        self.exit(1);
+    }
+
+    fn exit(&self, code: i32) -> ! {
+        if let Some(scratch) = &self.scratch {
+            let _ = std::fs::remove_dir_all(scratch);
+        }
+        process::exit(code);
     }
 }
 
 fn main() {
-    let args = match parse_args(std::env::args().skip(1)) {
+    let mut args = match parse_args(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(error) => {
             eprintln!("{error}\n{USAGE}");
             process::exit(2);
         }
     };
-    let mut protocol = Protocol(logs::redirect().expect("redirecting stdout and stderr"));
+    let mut protocol = Protocol {
+        out: logs::redirect().expect("redirecting stdout and stderr"),
+        scratch: None,
+    };
     protocol.send(json!({
         "type": "hello",
         "protocol": 0,
         "name": args.name,
         "stall_timeout_ms": args.stall_timeout_ms,
     }));
+
+    if let Some(fonts) = &args.fonts {
+        let overlay = std::env::temp_dir().join(format!("bombadil-flutter-{}", process::id()));
+        protocol.scratch = Some(overlay.clone());
+        fonts::overlay(Path::new(&args.options.assets), Path::new(fonts), &overlay)
+            .unwrap_or_else(|e| protocol.fail(format!("adding the fonts in {fonts}: {e}")));
+        args.options.assets = overlay.to_string_lossy().into_owned();
+    }
 
     let host = Host::start(args.options).unwrap_or_else(|e| protocol.fail(e));
     std::thread::spawn(move || {
@@ -333,7 +391,7 @@ fn main() {
         }
     }
     host.shutdown();
-    process::exit(0);
+    protocol.exit(0);
 }
 
 #[cfg(test)]
@@ -345,15 +403,24 @@ mod tests {
         assert_eq!(parse_action(&json!("Back")), Ok(Action::Back));
         assert_eq!(
             parse_action(&json!({"Tap": {"node": 7}})),
-            Ok(Action::Semantics { node: 7, action: "tap" })
+            Ok(Action::Semantics {
+                node: 7,
+                action: "tap"
+            })
         );
         assert_eq!(
             parse_action(&json!({"ScrollDown": {"node": 2}})),
-            Ok(Action::Semantics { node: 2, action: "scrollDown" })
+            Ok(Action::Semantics {
+                node: 2,
+                action: "scrollDown"
+            })
         );
         assert_eq!(
             parse_action(&json!({"SetText": {"node": 3, "text": "hi"}})),
-            Ok(Action::SetText { node: 3, text: "hi".into() })
+            Ok(Action::SetText {
+                node: 3,
+                text: "hi".into()
+            })
         );
         assert_eq!(
             parse_action(&json!({"PointerTap": {"x": 1, "y": 2.5}})),
@@ -368,7 +435,13 @@ mod tests {
     fn parses_arguments() {
         let args = parse_args(
             [
-                "--assets", "a", "--icu-data", "i", "--size", "800x600", "--",
+                "--assets",
+                "a",
+                "--icu-data",
+                "i",
+                "--size",
+                "800x600",
+                "--",
                 "--verbose-logging",
             ]
             .map(String::from)

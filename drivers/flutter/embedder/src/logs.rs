@@ -110,7 +110,9 @@ mod tests {
     fn reads_unhandled_exceptions() {
         let mut watcher = Watcher::default();
         assert_eq!(
-            watcher.line("[ERROR:flutter/runtime/dart_vm_initializer.cc(40)] Unhandled Exception: boom"),
+            watcher.line(
+                "[ERROR:flutter/runtime/dart_vm_initializer.cc(40)] Unhandled Exception: boom"
+            ),
             Some("Unhandled Exception: boom".to_string())
         );
         assert_eq!(watcher.line("flutter: hello"), None);

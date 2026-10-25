@@ -199,7 +199,10 @@ impl Tree {
             json!([l.round(), t.round(), (r - l).round(), (b - t).round()]),
         );
         let on_screen = r > l && b > t && r > 0.0 && b > 0.0 && l < screen.0 && t < screen.1;
-        out.insert("visible".into(), json!(on_screen && !node.has_flag("hidden")));
+        out.insert(
+            "visible".into(),
+            json!(on_screen && !node.has_flag("hidden")),
+        );
         if let Some([position, min, max]) = node.scroll {
             out.insert(
                 "scroll".into(),
@@ -292,7 +295,10 @@ mod tests {
     fn scales_rects() {
         let scale = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0];
         assert_eq!(
-            transform_rect(&multiply(&scale, &translate(1.0, 1.0)), [0.0, 0.0, 2.0, 3.0]),
+            transform_rect(
+                &multiply(&scale, &translate(1.0, 1.0)),
+                [0.0, 0.0, 2.0, 3.0]
+            ),
             [2.0, 2.0, 6.0, 8.0]
         );
     }
