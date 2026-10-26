@@ -89,10 +89,13 @@ const inApp = () => pkg.current === APP;
 const has = (label: string) => nodes.current.some((n) => n.label === label);
 const onTopLevelScreen = () =>
   inApp() && nodes.current.some((n) => n.resourceId === "niaTopAppBar");
-/** Where Back would leave the app. */
+/**
+ * Where Back would leave the app: the For you feed. Recognised by its tag
+ * rather than the selected navigation item, which may not be drawn yet in
+ * a best-effort state.
+ */
 const atStartDestination = () =>
-  onTopLevelScreen() &&
-  nodes.current.some((n) => n.selected && n.label === "For you");
+  inApp() && nodes.current.some((n) => n.resourceId === "forYou:feed");
 
 // Properties
 
