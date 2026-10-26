@@ -35,11 +35,20 @@ type Window = {
   nodes: Node[];
 };
 
+/** An activity start that would have left the app, which the driver blocked. */
+type BlockedIntent = {
+  action: string | null;
+  data: string | null;
+  package: string | null;
+};
+
 type State = {
   package: string | null;
   activity: string | null;
   focus: string | null;
   lastAction: unknown;
+  /** Hand-offs to other apps the agent blocked during the last action. */
+  blockedIntents: BlockedIntent[];
   windows: Window[];
 };
 
@@ -49,8 +58,10 @@ const APPS = [
   "com.google.samples.apps.nowinandroid.demo",
 ];
 const isApp = (p: string | null) => p !== null && APPS.includes(p);
-// Tapping a news item opens its article in the system browser.
-const BROWSER = "org.chromium.webview_shell";
+// The system dialog for the permissions the app asks for (notifications,
+// unless the driver grants it): part of the app's flow, so the driver lets
+// it through.
+const PERMISSION_DIALOG = "com.android.permissioncontroller";
 const TOP_LEVEL = ["For you", "Saved", "Interests"];
 const CRASH_OR_ANR = /keeps stopping|has stopped|isn.t responding/;
 
@@ -73,7 +84,17 @@ const appNodes = (s: State) =>
   );
 
 const pkg = extract((s: State) => s.package);
+/** Whether the keyboard is shown (Back then closes it instead of going back). */
+const keyboard = extract((s: State) =>
+  s.windows.some((w) => w.type === "inputMethod"),
+);
 const lastAction = extract((s: State) => JSON.stringify(s.lastAction));
+/** The node the last action tapped, if it was a tap. */
+const tapped = extract(
+  (s: State) =>
+    (s.lastAction as { Tap?: { node?: string } } | null)?.Tap?.node ?? null,
+);
+const blocked = extract((s: State) => s.blockedIntents ?? []);
 const nodes = extract(appNodes);
 /** Window titles and labels anywhere on screen that read like a crash or ANR dialog. */
 const crashOrAnr = extract((s: State) =>
@@ -104,10 +125,38 @@ const atStartDestination = () =>
 
 // Properties
 
-/** The app stays in front, except for articles it opens in the browser. */
+/**
+ * The app stays in front, or the system's permission dialog it asked for.
+ * The driver blocks hand-offs to other apps (an article opening in the
+ * browser), so nothing else should get there.
+ */
 export const appInForeground = always(
-  () => inApp() || pkg.current === BROWSER,
+  () => inApp() || pkg.current === PERMISSION_DIALOG,
 );
+
+const isWebLink = (i: BlockedIntent) =>
+  i.action === "android.intent.action.VIEW" && /^https?:\/\//.test(i.data ?? "");
+
+/** The only hand-offs the app attempts are web links. */
+export const onlyWebLinksLeaveTheApp = always(() =>
+  blocked.current.every(isWebLink),
+);
+
+/** Tapping a news resource card tries to open its article's web page. */
+export const articleTapOpensItsLink = always(() => {
+  if (!inApp()) return true;
+  const cards = new Set(
+    nodes.current
+      .filter((n) => n.resourceId.startsWith("newsResourceCard:"))
+      .map((n) => n.id),
+  );
+  return next(
+    () =>
+      tapped.current === null ||
+      !cards.has(tapped.current) ||
+      blocked.current.some(isWebLink),
+  );
+});
 
 /** No "keeps stopping" or "isn't responding" dialog ever shows. */
 export const noCrashOrAnrDialog = always(() => crashOrAnr.current.length === 0);
@@ -124,10 +173,13 @@ export const bottomNavigationOnTopLevelScreens = always(
   ),
 );
 
-/** Back from a topic's screen always leaves that topic. */
+/**
+ * Back from a topic's screen always leaves that topic, unless the keyboard
+ * is up: Back closes it first.
+ */
 export const backLeavesTopicScreen = always(() => {
   const shown = topic.current;
-  if (shown === null || !inApp()) return true;
+  if (shown === null || !inApp() || keyboard.current) return true;
   return next(() => lastAction.current !== '"Back"' || topic.current !== shown);
 });
 

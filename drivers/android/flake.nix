@@ -59,7 +59,9 @@
               android.androidsdk
               git
               jq
-            ];
+            ]
+            # setsid, for examples/nowinandroid/setup.sh.
+            ++ pkgs.lib.optional pkgs.stdenv.isLinux pkgs.util-linux;
             ANDROID_HOME = sdk;
             ANDROID_SDK_ROOT = sdk;
             # Gradle's aapt2 from Maven is dynamically linked and doesn't run

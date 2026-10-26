@@ -16,6 +16,9 @@ fi
 # NIA_NO_AGENT=1: drive the app from outside only, through the helper.
 agent=(--agent "$NIA_AGENT")
 if [[ -n ${NIA_NO_AGENT:-} ]]; then agent=(); fi
+# NIA_ALLOW_EXTERNAL=1: let the app open other apps (the browser for an
+# article) instead of the agent blocking them.
+if [[ -n ${NIA_ALLOW_EXTERNAL:-} ]]; then agent+=(--allow-external-activities); fi
 
 exec "$repo/build/install/bombadil-compose/bin/bombadil-android" \
   --package "$NIA_PACKAGE" \

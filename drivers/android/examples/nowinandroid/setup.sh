@@ -66,8 +66,10 @@ if [[ $gpu == auto ]]; then
 fi
 emu=$(dirname "$(readlink -f "$(command -v emulator)")")
 
-# boot <port> <gpu>: starts an emulator in the background. Every instance
-# is read-only, so several can share the AVD.
+# boot <port> <gpu>: starts an emulator in the background, in its own
+# session so that it outlives whatever ran setup.sh (a signal to that
+# process group would take it down too). Every instance is read-only, so
+# several can share the AVD.
 boot() {
   local args=(-avd "$AVD_NAME" -port "$1" -read-only -no-snapshot -no-window -no-audio -no-boot-anim -memory 4096 -cores 4)
   local log=$ANDROID_AVD_HOME/emulator-$1.log
@@ -75,9 +77,9 @@ boot() {
     ANDROID_EMULATOR_LAUNCHER_DIR=$emu ANDROID_EGL_ON_EGL=1 \
       LD_LIBRARY_PATH=$emu/lib64:$emu/lib64/vulkan:${GLVND_LIB:?run inside nix develop}:$gl/lib \
       VK_ADD_DRIVER_FILES=${VK_ADD_DRIVER_FILES-$gl/share/vulkan/icd.d} \
-      nohup "$emu/qemu/linux-x86_64/qemu-system-x86_64-headless" "${args[@]}" -gpu host >"$log" 2>&1 &
+      setsid nohup "$emu/qemu/linux-x86_64/qemu-system-x86_64-headless" "${args[@]}" -gpu host >"$log" 2>&1 &
   else
-    nohup emulator "${args[@]}" -gpu swiftshader_indirect >"$log" 2>&1 &
+    setsid nohup emulator "${args[@]}" -gpu swiftshader_indirect >"$log" 2>&1 &
   fi
   pids[emulator-$1]=$!
   modes[emulator-$1]=$2
