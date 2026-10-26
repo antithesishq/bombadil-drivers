@@ -3,6 +3,7 @@ package me.uzaaft.bombadil.agent
 import android.app.Activity
 import android.app.Instrumentation
 import android.graphics.Rect
+import android.graphics.Region
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Bundle
@@ -16,6 +17,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Checkable
 import android.widget.TextView
@@ -27,12 +29,14 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsConfiguration
 import androidx.compose.ui.semantics.SemanticsNode
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.SemanticsPropertiesAndroid
 import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.AnnotatedString
 import me.uzaaft.bombadil.helper.Tree
 import org.json.JSONObject
 import java.util.WeakHashMap
+import kotlin.math.roundToInt
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
@@ -264,8 +268,8 @@ class Agent : Instrumentation() {
     }
 
     /**
-     * Whether another of the app's windows (a dialog, say) has input focus
-     * over the node's. Semantics actions and View methods would reach the
+     * Whether another of the app's windows that takes input (a dialog, say)
+     * is in front of the node's. Semantics actions and View methods would reach the
      * node anyway, which no user can: act on it with real input instead,
      * which goes to the window in front.
      */
@@ -275,7 +279,9 @@ class Agent : Instrumentation() {
             is View -> handle.rootView
             else -> return false
         }
-        return !window.hasWindowFocus() && roots().any { it.first !== window && it.first.hasWindowFocus() }
+        val windows = roots().map { it.first }
+        val top = topFocusable(windows) ?: return false
+        return window !== top && windows.indexOf(window) > windows.indexOf(top)
     }
 
     private fun focusedEditable(): Tree.Node? = nodes.values.firstOrNull { it.focused && it.editable }
@@ -414,11 +420,12 @@ class Agent : Instrumentation() {
             }
 
             fun check() {
-                // Resumed but without input focus: a dialog of the app just
-                // closed, and focus comes back a frame or two later. If it
-                // doesn't within FOCUS_WAIT_MS (a fallback), something outside
-                // the app is in front, and the driver asks the helper.
-                val reason = busy() ?: if (resumed.isNotEmpty() && focusedRoot() == null &&
+                // Resumed, but the app's front window doesn't have input focus
+                // yet: a dialog just opened, or closed, and focus moves a frame
+                // or two later. If it doesn't within FOCUS_WAIT_MS (a fallback),
+                // something outside the app is in front, and the driver asks the
+                // helper.
+                val reason = busy() ?: if (resumed.isNotEmpty() && !frontFocused() &&
                     SystemClock.uptimeMillis() < start + FOCUS_WAIT_MS
                 ) {
                     "focus"
@@ -434,7 +441,7 @@ class Agent : Instrumentation() {
                     val tree = tree()
                     result = Settled(
                         tree, reason, built - start, rounds, SystemClock.uptimeMillis() - built,
-                        focusedRoot() != null, resumed.isNotEmpty(), topActivity(), busyMs,
+                        frontFocused(), resumed.isNotEmpty(), topActivity(), busyMs,
                     )
                     done.countDown()
                     return
@@ -476,7 +483,7 @@ class Agent : Instrumentation() {
                     if (result == null) {
                     val built = SystemClock.uptimeMillis()
                     result = Settled(tree(), busy() ?: "nothing", built - start, check.rounds,
-                        SystemClock.uptimeMillis() - built, focusedRoot() != null, resumed.isNotEmpty())
+                        SystemClock.uptimeMillis() - built, frontFocused(), resumed.isNotEmpty())
                     }
                 } catch (e: Throwable) {
                     Log.e(TAG, "reading the tree failed", e)
@@ -576,7 +583,19 @@ class Agent : Instrumentation() {
 
     private fun topActivity(): String? = topActivityInstance()?.componentName?.flattenToString()
 
-    private fun focusedRoot(): View? = roots().firstOrNull { it.first.hasWindowFocus() }?.first
+    /** The app's front window that takes input: popups don't. */
+    private fun topFocusable(windows: List<View> = roots().map { it.first }): View? = windows.firstOrNull {
+        val params = it.layoutParams as? WindowManager.LayoutParams
+        params == null || params.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE == 0
+    }
+
+    private fun modal(view: View): Boolean {
+        val flags = (view.layoutParams as? WindowManager.LayoutParams)?.flags ?: return false
+        return flags and (WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL) == 0
+    }
+
+    /** Whether the app's front window has input focus, so that nothing else is in front of it. */
+    private fun frontFocused(): Boolean = topFocusable()?.hasWindowFocus() == true
 
     private fun tree(): String {
         val windows = ArrayList<Tree.Window>()
@@ -601,6 +620,9 @@ class Agent : Instrumentation() {
             window.root = viewNode(view, location, clip)
             windows.add(window)
             if (window.focused) focus = title
+            // A modal window (a dialog) takes every touch, so accessibility
+            // leaves out the windows behind it; so does the state.
+            if (modal(view)) break
         }
         nodes = Tree.build(windows)
         val packageName = if (windows.any { it.focused }) targetContext.packageName else null
@@ -637,7 +659,7 @@ class Agent : Instrumentation() {
             val semantics = view.semanticsOwner.unmergedRootSemanticsNode
             val location = IntArray(2)
             view.view.rootView.getLocationOnScreen(location)
-            node.children.add(semanticsNode(view, semantics, location, r))
+            semanticsNode(view, semantics, location, r, Region(r), isRoot = true)?.let { node.children.add(it) }
         } else if (view is ViewGroup) {
             for (i in 0 until view.childCount) {
                 val child = view.getChildAt(i)
@@ -668,15 +690,47 @@ class Agent : Instrumentation() {
         }
     }
 
-    private fun semanticsNode(root: ViewRootForTest, semantics: SemanticsNode, origin: IntArray, clip: Rect): Tree.Node {
+    /**
+     * The node and its descendants as accessibility would show them, or
+     * null if it wouldn't, following Compose's accessibility layer
+     * (`getAllUncoveredSemanticsNodesToIntObjectMap`): nodes that aren't
+     * placed, are transparent or hidden from accessibility are left out,
+     * and so are nodes whose whole area is covered by important nodes in
+     * front of them (later siblings, and their descendants), as when a
+     * screen stays composed behind the one on top. [uncovered] is the
+     * root's area not yet covered, in screen coordinates; bounds are clipped
+     * to it and the window ([clip]), not to the parent, as there; children are
+     * visited front to back, as Compose does, and each important node
+     * takes its area out of it.
+     */
+    private fun semanticsNode(
+        root: ViewRootForTest, semantics: SemanticsNode, origin: IntArray, clip: Rect, uncovered: Region, isRoot: Boolean = false,
+        tagsAsIds: Boolean = false,
+    ): Tree.Node? {
         val config = semantics.config
+        // Test tags show up as resource ids where the app asks for it, for a
+        // node and its descendants (`testTagsAsResourceId`).
+        val tags = config.opt(SemanticsPropertiesAndroid.TestTagsAsResourceId) ?: tagsAsIds
+        if (!isRoot && (!semantics.layoutInfo.isPlaced || !semantics.layoutInfo.isAttached || hidden(semantics))) return null
+        // Touch bounds, as accessibility reports: at least 48dp for clickable
+        // nodes. They're relative to the Compose root; move them into the window.
+        val inWindow = semantics.boundsInWindow
+        val inRoot = semantics.boundsInRoot
+        val b = semantics.touchBoundsInRoot
+        val dx = inWindow.left - inRoot.left + origin[0]
+        val dy = inWindow.top - inRoot.top + origin[1]
+        val touch = Rect(round(b.left + dx), round(b.top + dy), round(b.right + dx), round(b.bottom + dy))
+        val visible = Region(touch)
+        if (!visible.op(uncovered, Region.Op.INTERSECT) && !isRoot) return null
+        val r = Rect(visible.bounds)
+        if (!r.intersect(clip)) r.setEmpty()
         val node = Tree.Node()
         node.handle = SemanticsHandle(root, semantics.id)
         val editable = config.opt(SemanticsProperties.EditableText)
         val text = config.opt(SemanticsProperties.Text)
         node.text = editable?.text ?: text?.joinToString(", ") { it.text } ?: ""
         node.desc = config.opt(SemanticsProperties.ContentDescription)?.joinToString(", ") ?: ""
-        node.resourceId = config.opt(SemanticsProperties.TestTag) ?: ""
+        node.resourceId = if (tags) config.opt(SemanticsProperties.TestTag) ?: "" else ""
         node.className = className(config, editable != null, text != null)
         // As accessibility reports them: a selected tab or radio button takes no click.
         val role = config.opt(SemanticsProperties.Role)
@@ -692,22 +746,30 @@ class Agent : Instrumentation() {
         node.selected = selected
         node.focused = config.opt(SemanticsProperties.Focused) == true
         node.editable = editable != null
-        // Touch bounds, as accessibility reports: at least 48dp for clickable
-        // nodes. They're relative to the Compose root; move them into the window.
-        val inWindow = semantics.boundsInWindow
-        val inRoot = semantics.boundsInRoot
-        val b = semantics.touchBoundsInRoot
-        val dx = inWindow.left - inRoot.left + origin[0]
-        val dy = inWindow.top - inRoot.top + origin[1]
-        val r = Rect((b.left + dx).toInt(), (b.top + dy).toInt(), (b.right + dx).toInt(), (b.bottom + dy).toInt())
-        if (!r.intersect(clip)) r.setEmpty()
         node.left = r.left; node.top = r.top; node.right = r.right; node.bottom = r.bottom
-        for (child in semantics.children) {
-            val hidden = child.config.has(SemanticsProperties.HideFromAccessibility) ||
-                @Suppress("DEPRECATION") child.config.has(SemanticsProperties.InvisibleToUser)
-            if (!hidden) node.children.add(semanticsNode(root, child, origin, r))
-        }
+        val children = semantics.children
+        val kept = arrayOfNulls<Tree.Node>(children.size)
+        for (i in children.indices.reversed()) kept[i] = semanticsNode(root, children[i], origin, clip, uncovered, tagsAsIds = tags)
+        kept.filterNotNullTo(node.children)
+        if (!isRoot && important(semantics)) uncovered.op(touch, Region.Op.DIFFERENCE)
         return node
+    }
+
+    private fun round(x: Float): Int = x.roundToInt()
+
+    private fun hidden(semantics: SemanticsNode): Boolean =
+        semantics.config.has(SemanticsProperties.HideFromAccessibility) ||
+            @Suppress("DEPRECATION") semantics.config.has(SemanticsProperties.InvisibleToUser) ||
+            IS_TRANSPARENT?.invoke(semantics) == true
+
+    /** Whether accessibility would announce the node: then it hides what's behind it. */
+    private fun important(semantics: SemanticsNode): Boolean {
+        val config = semantics.config
+        if (config.isMergingSemanticsOfDescendants) return true
+        CONTAINS_IMPORTANT?.let { return it.invoke(config) == true }
+        return config.has(SemanticsProperties.Text) || config.has(SemanticsProperties.ContentDescription) ||
+            config.has(SemanticsProperties.EditableText) || config.has(SemanticsActions.OnClick) ||
+            config.has(SemanticsProperties.ToggleableState) || config.has(SemanticsProperties.StateDescription)
     }
 
     private fun canScroll(range: androidx.compose.ui.semantics.ScrollAxisRange?): Boolean =
@@ -759,6 +821,12 @@ class Agent : Instrumentation() {
         const val SOCKET = "bombadil-agent"
         const val FOCUS_WAIT_MS = 300L
         val BACKGROUND_POOLS = listOf("DefaultDispatcher-worker-", "arch_disk_io_")
+        // Compose internals its accessibility layer uses; public in the bytecode.
+        val IS_TRANSPARENT: java.lang.reflect.Method? =
+            runCatching { SemanticsNode::class.java.getMethod("isTransparent\$ui") }.getOrNull()
+        val CONTAINS_IMPORTANT: java.lang.reflect.Method? =
+            runCatching { SemanticsConfiguration::class.java.getMethod("containsImportantForAccessibility\$ui") }.getOrNull()
+
         val SCHEDULER_WORKERS = Regex("CPU = (\\d+), blocking = (\\d+)")
         val SCHEDULER_QUEUES = Regex("global CPU queue size = (\\d+), global blocking queue size = (\\d+)")
         val SCHEDULER_LOCAL = Regex("running workers queues = \\[([^\\]]*)\\]")

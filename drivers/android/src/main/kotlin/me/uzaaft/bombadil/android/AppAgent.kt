@@ -23,8 +23,8 @@ import java.security.MessageDigest
  *
  * `state`'s responses: `settled` (false if the cap was reached; `busy`
  * says with what: `recomposer`, `layout`, `queue`, `focus`, `blocked`), `waitMs`,
- * `rounds`, `buildMs`, `focused` (whether one of the app's windows has
- * input focus; if not, something else is in front), `resumed`, and
+ * `rounds`, `buildMs`, `focused` (whether the app's front window that takes
+ * input has input focus; if not, something else is in front), `resumed`, and
  * `state`, the app's windows in the helper's shape, without the system's
  * (no `state` if the main thread is blocked).
  *
