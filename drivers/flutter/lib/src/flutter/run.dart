@@ -39,6 +39,7 @@ Future<Never> runBombadil(
   String? fontsDir,
   Size? size,
   double devicePixelRatio = 1,
+  bool rasterize = false,
 }) async {
   final env = Platform.environment;
   final viewSize =
@@ -52,6 +53,7 @@ Future<Never> runBombadil(
       driverZone,
       size: viewSize,
       devicePixelRatio: devicePixelRatio,
+      rasterize: rasterize || env['BOMBADIL_FLUTTER_RASTERIZE'] == '1',
     );
     FlutterError.onError = (details) {
       monitor.reportError(

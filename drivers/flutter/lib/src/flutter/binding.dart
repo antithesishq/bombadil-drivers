@@ -160,9 +160,9 @@ class _TrackedTimer implements Timer {
 /// runs it in the next turn of the event loop, the way
 /// `PlatformDispatcher.scheduleWarmUpFrame` does: `handleBeginFrame`, then
 /// microtasks, then `handleDrawFrame`. The frame builds, lays out, paints
-/// and updates the semantics tree, but the engine ignores the scene (it
-/// renders only inside its own frames), so nothing is rasterized: the
-/// driver reads semantics, not pixels.
+/// and updates the semantics tree. Unless [rasterize] is set, it doesn't
+/// send the scene to the engine (the first frame stays deferred), so
+/// nothing is rasterized: the driver reads semantics, not pixels.
 class BombadilBinding extends BindingBase
     with
         GestureBinding,
@@ -178,26 +178,31 @@ class BombadilBinding extends BindingBase
     this.driverZone,
     this.viewSize,
     this.viewPixelRatio,
+    this.rasterize,
   );
 
   /// Creates the binding, in the app's zone, which [monitor] watches.
   /// [driverZone] is where the driver's own timers go. The app's view is
   /// [size] logical pixels at [devicePixelRatio], whatever the engine says.
+  /// Frames go to the engine, which rasterizes them, only if [rasterize].
   static BombadilBinding ensureInitialized(
     AppMonitor monitor,
     Zone driverZone, {
     Size size = const Size(1024, 768),
     double devicePixelRatio = 1,
+    bool rasterize = false,
   }) {
     return _instance ??= BombadilBinding._(
       monitor,
       driverZone,
       size,
       devicePixelRatio,
+      rasterize,
     );
   }
 
   final Size viewSize;
+  final bool rasterize;
   final double viewPixelRatio;
 
   /// The engine's dispatcher, with the view's metrics overridden.
@@ -229,6 +234,10 @@ class BombadilBinding extends BindingBase
       ..devicePixelRatio = viewPixelRatio
       ..physicalSize = viewSize * viewPixelRatio;
     super.initInstances();
+    // Frames lay out and paint, and the driver flushes semantics itself
+    // ([_drawFrame]), but they never reach the engine, which would
+    // rasterize every one of them in software on this thread.
+    if (!rasterize) deferFirstFrame();
   }
 
   @override
@@ -278,6 +287,7 @@ class BombadilBinding extends BindingBase
 
   void _drawFrame() {
     appZone.run(handleDrawFrame);
+    if (!rasterize) appZone.run(rootPipelineOwner.flushSemantics);
     _framePending = false;
     monitor.notify();
     _pump();
