@@ -60,12 +60,18 @@ class AdbAppDriver(
     private val settleTimeoutMs: Long = 10_000,
     /**
      * After an action: the app has finished responding once its windows
-     * have presented no frame for this long (three refresh periods at 60Hz),
-     * or, after a window change, sent no accessibility event for this long.
+     * have presented no frame for this long (two refresh periods at 60Hz),
+     * or, after an activity or window change, sent no accessibility event
+     * for this long. One refresh period left 16% of states mid-transition,
+     * against 10% with two or three.
      */
-    private val gapMs: Long = 50,
-    /** The same after Back and Home, which can finish an activity whose window change comes late. */
-    private val globalGapMs: Long = 250,
+    private val gapMs: Long = 33,
+    /**
+     * Fallback: after Back or Home in another app (say, the browser the app
+     * opened), which gives no signal that it has finished handling them,
+     * the gap is this long instead.
+     */
+    private val foreignGapMs: Long = 250,
     /**
      * Fallback: no frame or window change within this long means the action
      * changed nothing visible. An accessibility click that starts another
@@ -249,7 +255,7 @@ class AdbAppDriver(
             helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
         } else {
             helper.request(
-                "next", "gapMs" to gapMs, "globalGapMs" to globalGapMs, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
+                "next", "gapMs" to gapMs, "foreignGapMs" to foreignGapMs, "appPackage" to packageName, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
                 "drainMaxMs" to drainMaxMs,
             )
         }

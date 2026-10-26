@@ -25,10 +25,10 @@ import java.security.MessageDigest
  * - `settle` `quietMs` `timeoutMs` → `state`, `stable`, `trees`: waits for
  *   `quietMs` without accessibility events and fetches the tree, until two
  *   trees agree. For a session's first state.
- * - `next` `gapMs` `globalGapMs` `frameTimeoutMs` `windowTimeoutMs` `drainMaxMs` →
- *   `state`, `signal` (`frame`, `window`, `timeout`, `windowCap`,
+ * - `next` `gapMs` `foreignGapMs` `appPackage` `frameTimeoutMs` `windowTimeoutMs` `drainMaxMs` →
+ *   `state`, `signal` (`frame`, `activity`, `window`, `timeout`, `windowCap`,
  *   `drainCap`), `waitMs`, `firstFrameMs`, `frames`, `buildMs`: after an
- *   action, waits for the app's response (frames presented, or a window
+ *   action, waits for the app's response (frames presented, or an activity or window
  *   change) and returns the tree, best effort.
  * - `click`/`longClick` `node`, `setText` `node`? `text` `replace`?,
  *   `scroll` `node` `direction` → `done`, then `via` (`action` or

@@ -2,6 +2,7 @@ package me.uzaaft.bombadil.helper
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.ActivityManager
 import android.app.Instrumentation
 import android.app.UiAutomation
 import android.content.ComponentName
@@ -62,6 +63,8 @@ class Helper : Instrumentation() {
                 AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
             ui.serviceInfo = info
             ui.setOnAccessibilityEventListener { onEvent(it) }
+            // For the task stack, see [topActivity].
+            if (Build.VERSION.SDK_INT >= 29) ui.adoptShellPermissionIdentity()
             LocalServerSocket(SOCKET).use { server ->
                 Log.i(TAG, "listening on @$SOCKET")
                 while (true) {
@@ -138,6 +141,22 @@ class Helper : Instrumentation() {
     @Volatile
     private var lastActionGlobal = false
 
+    /** The top activity (package/class) when the last action was armed. */
+    private var topAtArm: String? = null
+
+    private val activityManager by lazy { context.getSystemService(ActivityManager::class.java) }
+
+    /**
+     * The top activity of the top task, as package/class. The task stack
+     * changes as soon as an activity is started, finished or moved to the
+     * back (in a few milliseconds), well before the windows follow: those
+     * are announced up to ~200ms later, once the window manager reports
+     * them to accessibility. Needs the shell's REAL_GET_TASKS, adopted at
+     * start; null if it's unavailable.
+     */
+    private fun topActivity(): String? =
+        runCatching { activityManager.getRunningTasks(1).firstOrNull()?.topActivity?.flattenToString() }.getOrNull()
+
     /** The windows that can respond to an action: the app's and the keyboard. */
     private fun respondingWindows(): Set<Int> {
         val ids = HashSet<Int>()
@@ -150,7 +169,9 @@ class Helper : Instrumentation() {
         return ids
     }
 
-    private fun hasActiveWindow(): Boolean = ui.windows.any { it.isActive && it.root != null }
+    /** Whether a window is active, and belongs to [pkg] if given. */
+    private fun hasActiveWindow(pkg: String? = null): Boolean =
+        ui.windows.any { it.isActive && it.root?.let { root -> pkg == null || root.packageName?.toString() == pkg } == true }
 
     /** Before an action: forgets the frames shown so far, so that the next ones stand out. */
     private fun arm() {
@@ -160,6 +181,7 @@ class Helper : Instrumentation() {
             armedWindows.add(id)
         }
         windowChangesAtArm = windowChanges
+        topAtArm = topActivity()
     }
 
     /**
@@ -169,39 +191,57 @@ class Helper : Instrumentation() {
      * If the app is still animating, the next state shows the rest.
      *
      * Before the action, [arm] clears the frame stats of the app's windows
-     * and the keyboard. Afterwards the signal is one of:
+     * and the keyboard, and notes the top activity. Afterwards the signal
+     * is one of:
      * - Frames: a watched window has presented a frame after the action, and
      *   neither a further frame nor an accessibility event has followed
      *   within [gapMs] (a few refresh periods), like the terminal driver
-     *   reading output until the program stops writing. After Back and
-     *   Home the gap is [globalGapMs]: they can finish an activity, whose
-     *   window presents a last frame well before the window change is
-     *   announced. Frames cover content changes that send no
-     *   accessibility events (most of Compose's).
+     *   reading output until the program stops writing. Frames cover
+     *   content changes that send no accessibility events (most of
+     *   Compose's).
+     * - An activity change: the top activity differs from the one before
+     *   the action (another activity or app started, or Back or Home left
+     *   one). The response is over once a window of the new top activity's
+     *   package is active and accessibility events and frames have paused
+     *   for [gapMs].
      * - A window change (TYPE_WINDOWS_CHANGED or TYPE_WINDOW_STATE_CHANGED:
-     *   an activity, dialog or keyboard coming or going): the response is
-     *   over once accessibility events and frames pause for [gapMs] and a
-     *   window is active. New windows aren't polled for frame stats: on API
-     *   35 that delayed a dialog's first frame by most of a second.
+     *   a dialog or keyboard coming or going): the response is over once
+     *   accessibility events and frames pause for [gapMs] and a window is
+     *   active. New windows aren't polled for frame stats: on API 35 that
+     *   delayed a dialog's first frame by most of a second.
      * Accessibility events wake the wait up; between them it polls the
-     * frame stats once per refresh period.
+     * frame stats and the top activity once per refresh period.
      *
      * Fallbacks, none of which is the mechanism:
-     * - [frameTimeoutMs]: no frame and no window change at all, so the
-     *   action changed nothing visible; the tree is reported as it is.
-     * - [windowTimeoutMs]: a window change that never goes quiet, or leaves
-     *   no window active, is reported after this long.
+     * - [frameTimeoutMs]: no frame, window or activity change at all, so
+     *   the action changed nothing visible; the tree is reported as it is.
+     * - [windowTimeoutMs]: a window or activity change that never goes
+     *   quiet, or leaves no window active, is reported after this long.
      * - [drainMaxMs]: an app that animates without pause never ends its
      *   burst of frames; the tree is reported mid-animation.
      */
-    private fun next(frameTimeoutMs: Long, windowTimeoutMs: Long, gapMs: Long, globalGapMs: Long, drainMaxMs: Long): String {
+    private fun next(
+        frameTimeoutMs: Long, windowTimeoutMs: Long, gapMs: Long, foreignGapMs: Long, drainMaxMs: Long, appPackage: String,
+    ): String {
         val start = System.nanoTime()
         val since = if (actedAt == 0L) start else actedAt
         val deadline = start + frameTimeoutMs * 1_000_000
         val windowDeadline = start + windowTimeoutMs * 1_000_000
         val drainDeadline = start + drainMaxMs * 1_000_000
         val gap = gapMs * 1_000_000
+        // Back or Home in another app (a browser the app opened): no signal
+        // tells when it has finished handling them. WebView, say, presents a
+        // frame and finishes its activity ~150ms later. Fallback: a longer gap.
+        // The app under test finishes its activities while handling Back,
+        // before its next frame, so the activity change is the signal there.
+        val frameGap = if (lastActionGlobal && topAtArm != null && topAtArm!!.substringBefore('/') != appPackage) {
+            foreignGapMs * 1_000_000
+        } else {
+            gap
+        }
         var windowChanged = false
+        // The package of the new top activity, once it has changed.
+        var newTop: String? = null
         // Frames seen per window: a window stops reporting stats once another
         // covers it, so keep the counts from earlier polls.
         val seenByWindow = HashMap<Int, Int>()
@@ -232,6 +272,10 @@ class Helper : Instrumentation() {
                 seenByWindow[id] = maxOf(seenByWindow[id] ?: n, n)
             }
             frames = seenByWindow.values.sum()
+            if (newTop == null && topAtArm != null) {
+                val top = topActivity()
+                if (top != null && top != topAtArm) newTop = top.substringBefore('/')
+            }
             var lastEvent: Long
             idleLock.withLock {
                 lastEvent = lastEventNanos
@@ -239,26 +283,22 @@ class Helper : Instrumentation() {
             }
             val now = System.nanoTime()
             var until: Long
-            if (windowChanged) {
-                // A window came or went (or Compose announced a new pane):
-                // the response is over once frames and accessibility events
-                // pause for a gap. New windows report their content with
-                // events, so the pause in events stands in for their frames.
+            if (windowChanged || newTop != null) {
+                // An activity or window came or went: the response is over
+                // once frames and accessibility events pause for a gap and
+                // the new activity's window is active. New windows report
+                // their content with events, so the pause in events stands
+                // in for their frames.
                 val quietSince = maxOf(lastEvent, lastFrame)
                 signal = when {
-                    now - quietSince >= gap && hasActiveWindow() -> "window"
+                    now - quietSince >= gap && hasActiveWindow(newTop) -> if (newTop != null) "activity" else "window"
                     now >= windowDeadline -> "windowCap"
                     else -> null
                 }
                 until = minOf(quietSince + gap, windowDeadline)
             } else if (frames > 0) {
-                // Accessibility events count as output too: a window that
-                // is going away presents a last frame well before the
-                // window change is announced (Back out of another app).
+                // Accessibility events count as output too.
                 val quietSince = maxOf(lastFrame, if (lastEvent > since) lastEvent else 0)
-                // Back and Home can finish an activity: its window presents a last
-                // frame, and the window change is announced up to ~200ms later.
-                val frameGap = if (lastActionGlobal) globalGapMs * 1_000_000 else gap
                 signal = if (now - quietSince >= frameGap) "frame" else if (now >= drainDeadline) "drainCap" else null
                 until = minOf(quietSince + frameGap, drainDeadline)
             } else {
@@ -379,8 +419,8 @@ class Helper : Instrumentation() {
             }
             "next" -> return next(
                 request.getLong("frameTimeoutMs"), request.getLong("windowTimeoutMs"),
-                request.getLong("gapMs"), request.optLong("globalGapMs", request.getLong("gapMs")),
-                request.getLong("drainMaxMs"),
+                request.getLong("gapMs"), request.getLong("foreignGapMs"), request.getLong("drainMaxMs"),
+                request.getString("appPackage"),
             )
             "click" -> return done(response, act(request, AccessibilityNodeInfo.ACTION_CLICK, false))
             "longClick" -> return done(response, act(request, AccessibilityNodeInfo.ACTION_LONG_CLICK, true))
@@ -425,6 +465,21 @@ class Helper : Instrumentation() {
     // Tree
 
     private fun tree(): String {
+        // Fetching each window's nodes in batches (API 33+) saves round trips
+        // to the app. On API 35 a batch occasionally comes back malformed
+        // (an NPE inside AccessibilityInteractionClient); fetch node by node
+        // then.
+        if (Build.VERSION.SDK_INT >= 33) {
+            try {
+                return tree(PREFETCH)
+            } catch (e: RuntimeException) {
+                Log.w(TAG, "prefetching failed; fetching node by node", e)
+            }
+        }
+        return tree(0)
+    }
+
+    private fun tree(prefetch: Int): String {
         // The node cache misses changes that apps don't send events for.
         if (Build.VERSION.SDK_INT >= 34) ui.clearCache()
         val infos = ArrayList(ui.windows)
@@ -433,7 +488,7 @@ class Helper : Instrumentation() {
         var activePackage: String? = null
         var activeTitle: String? = null
         for (info in infos) {
-            val root = info.root ?: continue
+            val root = (if (prefetch != 0) info.getRoot(prefetch) else info.root) ?: continue
             val window = Tree.Window()
             window.type = windowType(info.type)
             window.packageName = root.packageName?.toString() ?: ""
@@ -447,7 +502,7 @@ class Helper : Instrumentation() {
             window.top = r.top
             window.right = r.right
             window.bottom = r.bottom
-            window.root = node(root)
+            window.root = node(root, prefetch)
             windows.add(window)
             if (info.isActive) {
                 activePackage = window.packageName
@@ -559,6 +614,14 @@ class Helper : Instrumentation() {
         const val TAG = "BombadilHelper"
         const val SOCKET = "bombadil-helper"
 
+        // A node and up to 50 descendants per round trip, without stopping
+        // early when the next request comes in. Measured on API 35, Now in
+        // Android: 10ms instead of 23ms (onboarding), 29ms instead of 34ms
+        // (feed); depth-first was no faster, and without
+        // FLAG_PREFETCH_UNINTERRUPTIBLE prefetching gained nothing.
+        const val PREFETCH =
+            AccessibilityNodeInfo.FLAG_PREFETCH_DESCENDANTS_HYBRID or AccessibilityNodeInfo.FLAG_PREFETCH_UNINTERRUPTIBLE
+
         val ACTIONS = setOf("click", "longClick", "setText", "scroll", "tap", "swipe", "global", "key")
 
         /** `via` says how the action was done, or is null if it wasn't (with `reason`). */
@@ -569,7 +632,7 @@ class Helper : Instrumentation() {
             return response.put("done", true).put("via", via).toString()
         }
 
-        fun node(info: AccessibilityNodeInfo): Tree.Node {
+        fun node(info: AccessibilityNodeInfo, prefetch: Int): Tree.Node {
             val node = Tree.Node()
             node.handle = info
             node.resourceId = str(info.viewIdResourceName)
@@ -593,8 +656,8 @@ class Helper : Instrumentation() {
             node.right = r.right
             node.bottom = r.bottom
             for (i in 0 until info.childCount) {
-                val child = info.getChild(i)
-                if (child != null && child.isVisibleToUser) node.children.add(node(child))
+                val child = if (prefetch != 0) info.getChild(i, prefetch) else info.getChild(i)
+                if (child != null && child.isVisibleToUser) node.children.add(node(child, prefetch))
             }
             return node
         }
