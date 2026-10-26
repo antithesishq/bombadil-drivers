@@ -1,5 +1,5 @@
-// Properties of Now in Android (demoDebug), checked through the adb
-// driver. See README.md for how to run it.
+// Properties of Now in Android (demoDebug or demoBenchmarkRelease), checked
+// through the adb driver. See README.md for how to run it.
 import { always, eventually, next, now } from "@antithesishq/bombadil";
 import {
   actions,
@@ -43,7 +43,12 @@ type State = {
   windows: Window[];
 };
 
-const APP = "com.google.samples.apps.nowinandroid.demo.debug";
+// The app's package: demoDebug's, or demoBenchmarkRelease's (no suffix).
+const APPS = [
+  "com.google.samples.apps.nowinandroid.demo.debug",
+  "com.google.samples.apps.nowinandroid.demo",
+];
+const isApp = (p: string | null) => p !== null && APPS.includes(p);
 // Tapping a news item opens its article in the system browser.
 const BROWSER = "org.chromium.webview_shell";
 const TOP_LEVEL = ["For you", "Saved", "Interests"];
@@ -63,7 +68,7 @@ function flatten(nodes: Node[], into: Flat[] = []): Flat[] {
 const appNodes = (s: State) =>
   flatten(
     s.windows
-      .filter((w) => w.type === "application" && w.package === APP)
+      .filter((w) => w.type === "application" && isApp(w.package))
       .flatMap((w) => w.nodes),
   );
 
@@ -85,7 +90,7 @@ const topic = extract(
     null,
 );
 
-const inApp = () => pkg.current === APP;
+const inApp = () => isApp(pkg.current);
 const has = (label: string) => nodes.current.some((n) => n.label === label);
 const onTopLevelScreen = () =>
   inApp() && nodes.current.some((n) => n.resourceId === "niaTopAppBar");
@@ -101,7 +106,7 @@ const atStartDestination = () =>
 
 /** The app stays in front, except for articles it opens in the browser. */
 export const appInForeground = always(
-  () => pkg.current === APP || pkg.current === BROWSER,
+  () => inApp() || pkg.current === BROWSER,
 );
 
 /** No "keeps stopping" or "isn't responding" dialog ever shows. */

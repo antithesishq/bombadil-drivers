@@ -66,6 +66,10 @@
             # on NixOS; use the SDK's.
             GRADLE_OPTS = "-Dorg.gradle.project.android.aapt2FromMavenOverride=${sdk}/build-tools/37.0.0/aapt2";
             JAVA_HOME = pkgs.jdk21.home;
+            # For running the emulator on the host's GPU without its
+            # launcher (see examples/nowinandroid/setup.sh): libglvnd
+            # loads the host's EGL driver.
+            GLVND_LIB = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.libglvnd}/lib";
           };
         }
       );
