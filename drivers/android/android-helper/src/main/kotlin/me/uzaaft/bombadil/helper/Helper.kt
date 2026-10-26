@@ -154,6 +154,7 @@ class Helper : Instrumentation() {
      * them to accessibility. Needs the shell's REAL_GET_TASKS, adopted at
      * start; null if it's unavailable.
      */
+    @Suppress("DEPRECATION") // Still returns every task to the shell.
     private fun topActivity(): String? =
         runCatching { activityManager.getRunningTasks(1).firstOrNull()?.topActivity?.flattenToString() }.getOrNull()
 
@@ -172,6 +173,15 @@ class Helper : Instrumentation() {
     /** Whether a window is active, and belongs to [pkg] if given. */
     private fun hasActiveWindow(pkg: String? = null): Boolean =
         ui.windows.any { it.isActive && it.root?.let { root -> pkg == null || root.packageName?.toString() == pkg } == true }
+
+    /**
+     * Whether the window of [top] (package/class) has been shown and its
+     * package's window is active. The window state change that shows an
+     * activity names it; until then the old window of the same app may
+     * still be the active one.
+     */
+    private fun shown(top: String): Boolean =
+        activity == top.substringAfter('/') && hasActiveWindow(top.substringBefore('/'))
 
     /** Before an action: forgets the frames shown so far, so that the next ones stand out. */
     private fun arm() {
@@ -240,7 +250,7 @@ class Helper : Instrumentation() {
             gap
         }
         var windowChanged = false
-        // The package of the new top activity, once it has changed.
+        // The new top activity (package/class), once it has changed.
         var newTop: String? = null
         // Frames seen per window: a window stops reporting stats once another
         // covers it, so keep the counts from earlier polls.
@@ -274,7 +284,7 @@ class Helper : Instrumentation() {
             frames = seenByWindow.values.sum()
             if (newTop == null && topAtArm != null) {
                 val top = topActivity()
-                if (top != null && top != topAtArm) newTop = top.substringBefore('/')
+                if (top != null && top != topAtArm) newTop = top
             }
             var lastEvent: Long
             idleLock.withLock {
@@ -291,7 +301,8 @@ class Helper : Instrumentation() {
                 // in for their frames.
                 val quietSince = maxOf(lastEvent, lastFrame)
                 signal = when {
-                    now - quietSince >= gap && hasActiveWindow(newTop) -> if (newTop != null) "activity" else "window"
+                    now - quietSince >= gap && (if (newTop != null) shown(newTop) else hasActiveWindow()) ->
+                        if (newTop != null) "activity" else "window"
                     now >= windowDeadline -> "windowCap"
                     else -> null
                 }
@@ -327,6 +338,49 @@ class Helper : Instrumentation() {
             ",\"lastFrameMs\":" + (if (lastFrame < 0) -1.0 else (lastFrame - since) / 1e6) +
             ",\"frames\":" + frames + ",\"polls\":" + polls + ",\"retries\":" + retries + ",\"buildMs\":" + (built - waited) / 1e6 +
             ",\"state\":" + tree + "}"
+    }
+
+    /**
+     * For the in-process agent, when the app has started an activity or is
+     * finishing one: waits until the top activity is no longer [fromTop],
+     * its window has been shown (a window state change names it), a window
+     * of its package is active, and frames
+     * and accessibility events have paused for [gapMs], then returns the
+     * tree. The same signals as [next]'s activity change, without frames
+     * to watch (the agent acted, not the helper). Fallback:
+     * [windowTimeoutMs], if the activity never changes (a start that
+     * failed) or no window becomes active.
+     */
+    private fun await(fromTop: String?, gapMs: Long, windowTimeoutMs: Long): String {
+        val start = System.nanoTime()
+        val deadline = start + windowTimeoutMs * 1_000_000
+        val gap = gapMs * 1_000_000
+        var newTop: String? = null
+        var polls = 0
+        var signal: String?
+        while (true) {
+            polls++
+            if (newTop == null) {
+                val top = topActivity()
+                if (top != null && top != fromTop) newTop = top
+            }
+            val lastEvent = idleLock.withLock { lastEventNanos }
+            val now = System.nanoTime()
+            signal = when {
+                newTop != null && now - lastEvent >= gap && shown(newTop) -> "activity"
+                now >= deadline -> "windowCap"
+                else -> null
+            }
+            if (signal != null) break
+            val until = if (newTop != null) minOf(lastEvent + gap, deadline) else deadline
+            idleLock.withLock {
+                event.await(maxOf(1, minOf(refreshNanos, until - now) / 1_000_000), TimeUnit.MILLISECONDS)
+            }
+        }
+        val waited = System.nanoTime()
+        val tree = tree()
+        return "{\"ok\":true,\"signal\":\"" + signal + "\",\"waitMs\":" + (waited - start) / 1e6 + ",\"polls\":" + polls +
+            ",\"buildMs\":" + (System.nanoTime() - waited) / 1e6 + ",\"state\":" + tree + "}"
     }
 
     /** Remembers the last activity shown, from window state changes. */
@@ -417,6 +471,9 @@ class Helper : Instrumentation() {
                     idleMs + ",\"buildMs\":" + buildMs + ",\"ms\":" + (SystemClock.uptimeMillis() - start) +
                     ",\"state\":" + tree + "}"
             }
+            "await" -> return await(
+                request.optString("fromTop").ifEmpty { null }, request.getLong("gapMs"), request.getLong("windowTimeoutMs"),
+            )
             "next" -> return next(
                 request.getLong("frameTimeoutMs"), request.getLong("windowTimeoutMs"),
                 request.getLong("gapMs"), request.getLong("foreignGapMs"), request.getLong("drainMaxMs"),
