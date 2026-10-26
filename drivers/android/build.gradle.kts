@@ -66,6 +66,75 @@ val helperApk by tasks.registering(Exec::class) {
     executable = "bash"
 }
 
+// The in-process agent (`android-agent/`): Kotlin against android.jar and
+// the Compose version Now in Android ships, dexed without any library
+// (the app provides Compose and the Kotlin standard library at run time).
+// `android-agent/package.sh` turns the dex into an APK for one app.
+val agent: SourceSet = sourceSets.create("agent") {
+    kotlin.srcDirs("android-agent/src/main/kotlin", "android-helper/src/common/kotlin")
+}
+
+repositories {
+    google()
+}
+
+val composeVersion = "1.11.0-rc01"
+val agentAars: Configuration by configurations.creating { isTransitive = false }
+
+dependencies {
+    for (module in listOf("ui", "ui-geometry", "ui-text", "ui-unit", "ui-graphics")) {
+        agentAars("androidx.compose.ui:$module-android:$composeVersion@aar")
+    }
+    agentAars("androidx.compose.runtime:runtime-android:$composeVersion@aar")
+    "agentCompileOnly"(files(androidHome.map { "$it/platforms/android-35/android.jar" }))
+    "agentCompileOnly"(fileTree(layout.buildDirectory.dir("agent/aars")) { builtBy("agentAarClasses") })
+    "agentCompileOnly"("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.1")
+    "agentCompileOnly"("androidx.collection:collection-jvm:1.5.0")
+}
+
+/** The classes.jar of each AAR, as <name>.jar. */
+val agentAarClasses by tasks.registering {
+    val out = layout.buildDirectory.dir("agent/aars")
+    inputs.files(agentAars)
+    outputs.dir(out)
+    doLast {
+        delete(out)
+        for (aar in agentAars.files) {
+            copy {
+                from(zipTree(aar)) { include("classes.jar") }
+                into(out)
+                rename { aar.nameWithoutExtension + ".jar" }
+            }
+        }
+    }
+}
+
+tasks.named<JavaCompile>("compileAgentJava") { options.release = 11 }
+
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileAgentKotlin") {
+    dependsOn(agentAarClasses)
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+        noJdk = true
+    }
+}
+
+val agentDex by tasks.registering(Exec::class) {
+    val classes = agent.output.classesDirs
+    val out = layout.buildDirectory.dir("agent/dex")
+    inputs.files(classes)
+    outputs.dir(out)
+    argumentProviders.add {
+        listOf(
+            "--release", "--min-api", "26",
+            "--lib", androidHome.get() + "/platforms/android-35/android.jar",
+            "--output", out.get().asFile.also { it.mkdirs() }.path,
+        ) + agent.compileClasspath.files.filter { it.extension == "jar" }.flatMap { listOf("--classpath", it.path) } +
+            classes.files.flatMap { dir -> dir.walk().filter { it.extension == "class" }.map { it.path }.toList() }
+    }
+    executable = androidHome.get() + "/build-tools/36.0.0/d8"
+}
+
 sourceSets {
     main {
         kotlin.srcDir("examples")
