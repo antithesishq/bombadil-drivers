@@ -1,6 +1,6 @@
 // Properties of Now in Android (demoDebug), checked through the adb
 // driver. See README.md for how to run it.
-import { always, next } from "@antithesishq/bombadil";
+import { always, eventually, next, now } from "@antithesishq/bombadil";
 import {
   actions,
   extract,
@@ -104,9 +104,16 @@ export const appInForeground = always(
 /** No "keeps stopping" or "isn't responding" dialog ever shows. */
 export const noCrashOrAnrDialog = always(() => crashOrAnr.current.length === 0);
 
-/** Every top-level screen shows the whole bottom navigation. */
+/**
+ * Every top-level screen shows the whole bottom navigation, at the latest
+ * soon after it appears: the driver reports states best effort, so a
+ * screen can be caught while the navigation is still being drawn.
+ */
+const navigationMissing = () => onTopLevelScreen() && !TOP_LEVEL.every(has);
 export const bottomNavigationOnTopLevelScreens = always(
-  () => !onTopLevelScreen() || TOP_LEVEL.every(has),
+  now(navigationMissing).implies(
+    eventually(() => !navigationMissing()).within(2, "seconds"),
+  ),
 );
 
 /** Back from a topic's screen always leaves that topic. */
