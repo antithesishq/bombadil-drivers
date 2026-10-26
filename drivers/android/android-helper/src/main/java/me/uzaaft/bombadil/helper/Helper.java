@@ -205,45 +205,21 @@ public class Helper extends Instrumentation {
         long start = System.nanoTime();
         long since = actedAt == 0 ? start : actedAt;
         long deadline = start + frameTimeoutMs * 1_000_000;
+        long windowDeadline = start + windowTimeoutMs * 1_000_000;
         long drainDeadline = start + drainMaxMs * 1_000_000;
         long gap = gapMs * 1_000_000;
         boolean windowChanged = false;
-        // Frames seen per window: a window can stop reporting stats once
-        // another covers it (it leaves the interactive windows), so keep counts.
+        // Frames seen per window: a window stops reporting stats once another
+        // covers it, so keep the counts from earlier polls.
         Map<Integer, Integer> seenByWindow = new HashMap<>();
         long firstFrame = -1, lastFrame = -1;
-        int polls = 0, frames = 0;
-        String signal;
+        int polls = 0, frames = 0, retries = 0;
+        String signal, tree;
+        long waitedAt;
         while (true) {
-            long now = System.nanoTime();
-            if (!windowChanged && windowChanges != windowChangesAtArm) windowChanged = true;
-            if (windowChanged) {
-                // A window came or went: that is the response. New windows
-                // are not polled for frames (doing so delayed a dialog's
-                // first frame by most of a second on API 35); instead wait
-                // until accessibility events pause for a gap, as the
-                // window's content reports itself.
-                long lastEvent;
-                synchronized (idleLock) {
-                    lastEvent = lastEventNanos;
-                }
-                long quietSince = Math.max(lastEvent, lastFrame);
-                // Between one app's window going and another's coming (an
-                // article opening in the browser), no window is active yet:
-                // that's not a state worth reporting, so keep waiting.
-                if (now - quietSince >= gap && hasActiveWindow()) {
-                    signal = "window";
-                    break;
-                }
-                if (now >= start + windowTimeoutMs * 1_000_000) {
-                    signal = "windowCap";
-                    break;
-                }
-                synchronized (idleLock) {
-                    idleLock.wait(Math.max(1, Math.min(refreshNanos, quietSince + gap - now) / 1_000_000));
-                }
-                continue;
-            }
+            // Only the windows armed before the action: polling the stats of
+            // a window that has just appeared delayed its first frame by
+            // most of a second on API 35.
             polls++;
             for (int id : armedWindows) {
                 WindowContentFrameStats stats = ui.getWindowContentFrameStats(id);
@@ -261,32 +237,55 @@ public class Helper extends Instrumentation {
             }
             frames = 0;
             for (int n : seenByWindow.values()) frames += n;
-            now = System.nanoTime();
-            if (frames > 0 && now - lastFrame >= gap) {
-                signal = "frame";
-                break;
+            long lastEvent;
+            synchronized (idleLock) {
+                lastEvent = lastEventNanos;
+                if (windowChanges != windowChangesAtArm) windowChanged = true;
             }
-            if (frames > 0 && now >= drainDeadline) {
-                signal = "drainCap";
-                break;
+            long now = System.nanoTime();
+            long until;
+            if (windowChanged) {
+                // A window came or went (or Compose announced a new pane):
+                // the response is over once frames and accessibility events
+                // pause for a gap. New windows report their content with
+                // events, so the pause in events stands in for their frames.
+                long quietSince = Math.max(lastEvent, lastFrame);
+                if (now - quietSince >= gap && hasActiveWindow()) {
+                    signal = "window";
+                } else if (now >= windowDeadline) {
+                    signal = "windowCap";
+                } else {
+                    signal = null;
+                }
+                until = Math.min(quietSince + gap, windowDeadline);
+            } else if (frames > 0) {
+                signal = now - lastFrame >= gap ? "frame" : now >= drainDeadline ? "drainCap" : null;
+                until = Math.min(lastFrame + gap, drainDeadline);
+            } else {
+                signal = now >= deadline ? "timeout" : null;
+                until = deadline;
             }
-            if (frames == 0 && now >= deadline) {
-                signal = "timeout";
-                break;
+            if (signal != null) {
+                waitedAt = System.nanoTime();
+                tree = tree();
+                // Between one app's window going and another's coming, no
+                // window is active; that's not worth reporting. Fallback:
+                // after the window cap, report it anyway.
+                if (tree.startsWith("{\"package\":\"") || System.nanoTime() >= windowDeadline) break;
+                retries++;
+                until = now + refreshNanos;
             }
-            long until = frames > 0 ? Math.min(lastFrame + gap, drainDeadline) : deadline;
             synchronized (idleLock) {
                 idleLock.wait(Math.max(1, Math.min(refreshNanos, until - now) / 1_000_000));
             }
         }
-        long waited = System.nanoTime();
-        String tree = tree();
+        long waited = waitedAt;
         long built = System.nanoTime();
         return "{\"ok\":true,\"signal\":\"" + signal + "\",\"waitMs\":" + (waited - start) / 1e6
             + ",\"sinceActionMs\":" + (waited - since) / 1e6
             + ",\"firstFrameMs\":" + (firstFrame < 0 ? -1 : (firstFrame - since) / 1e6)
             + ",\"lastFrameMs\":" + (lastFrame < 0 ? -1 : (lastFrame - since) / 1e6)
-            + ",\"frames\":" + frames + ",\"polls\":" + polls + ",\"buildMs\":" + (built - waited) / 1e6
+            + ",\"frames\":" + frames + ",\"polls\":" + polls + ",\"retries\":" + retries + ",\"buildMs\":" + (built - waited) / 1e6
             + ",\"state\":" + tree + "}";
     }
 
