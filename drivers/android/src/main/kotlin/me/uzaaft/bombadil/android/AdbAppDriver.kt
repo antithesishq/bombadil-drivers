@@ -64,8 +64,15 @@ class AdbAppDriver(
      * or, after a window change, sent no accessibility event for this long.
      */
     private val gapMs: Long = 50,
-    /** Fallback: no frame within this long means the action changed nothing visible. */
-    private val frameTimeoutMs: Long = 200,
+    /** The same after Back and Home, which can finish an activity whose window change comes late. */
+    private val globalGapMs: Long = 250,
+    /**
+     * Fallback: no frame or window change within this long means the action
+     * changed nothing visible. An accessibility click that starts another
+     * app's activity draws nothing in the app, and the new window can take
+     * a few hundred milliseconds to appear.
+     */
+    private val frameTimeoutMs: Long = 500,
     /** Fallback: a window change that never goes quiet is reported after this long. */
     private val windowTimeoutMs: Long = 1_000,
     /** Fallback: an app that never stops presenting frames is reported mid-animation after this long. */
@@ -242,7 +249,7 @@ class AdbAppDriver(
             helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
         } else {
             helper.request(
-                "next", "gapMs" to gapMs, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
+                "next", "gapMs" to gapMs, "globalGapMs" to globalGapMs, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
                 "drainMaxMs" to drainMaxMs,
             )
         }

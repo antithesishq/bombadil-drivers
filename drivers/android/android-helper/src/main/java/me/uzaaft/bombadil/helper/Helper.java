@@ -142,6 +142,8 @@ public class Helper extends Instrumentation {
     private final Set<Integer> armedWindows = new HashSet<>();
     private long windowChangesAtArm;
     private long refreshNanos = 16_666_667;
+    /** Whether the last action was a global one (Back, Home). */
+    private volatile boolean lastActionGlobal;
 
     /** The windows that can respond to an action: the app's and the keyboard. */
     private Set<Integer> respondingWindows() {
@@ -183,7 +185,10 @@ public class Helper extends Instrumentation {
      * - Frames: a watched window has presented a frame after the action, and
      *   neither a further frame nor an accessibility event has followed
      *   within [gapMs] (a few refresh periods), like the terminal driver
-     *   reading output until the program stops writing. Frames cover content changes that send no
+     *   reading output until the program stops writing. After Back and
+     *   Home the gap is [globalGapMs]: they can finish an activity, whose
+     *   window presents a last frame well before the window change is
+     *   announced. Frames cover content changes that send no
      *   accessibility events (most of Compose's).
      * - A window change (TYPE_WINDOWS_CHANGED or TYPE_WINDOW_STATE_CHANGED:
      *   an activity, dialog or keyboard coming or going): the response is
@@ -201,7 +206,8 @@ public class Helper extends Instrumentation {
      * - [drainMaxMs]: an app that animates without pause never ends its
      *   burst of frames; the tree is reported mid-animation.
      */
-    private String next(long frameTimeoutMs, long windowTimeoutMs, long gapMs, long drainMaxMs) throws Exception {
+    private String next(long frameTimeoutMs, long windowTimeoutMs, long gapMs, long globalGapMs, long drainMaxMs)
+        throws Exception {
         long start = System.nanoTime();
         long since = actedAt == 0 ? start : actedAt;
         long deadline = start + frameTimeoutMs * 1_000_000;
@@ -263,8 +269,11 @@ public class Helper extends Instrumentation {
                 // is going away presents a last frame well before the
                 // window change is announced (Back out of another app).
                 long quietSince = Math.max(lastFrame, lastEvent > since ? lastEvent : 0);
-                signal = now - quietSince >= gap ? "frame" : now >= drainDeadline ? "drainCap" : null;
-                until = Math.min(quietSince + gap, drainDeadline);
+                // Back and Home can finish an activity: its window presents a last
+                // frame, and the window change is announced up to ~200ms later.
+                long frameGap = lastActionGlobal ? globalGapMs * 1_000_000 : gap;
+                signal = now - quietSince >= frameGap ? "frame" : now >= drainDeadline ? "drainCap" : null;
+                until = Math.min(quietSince + frameGap, drainDeadline);
             } else {
                 signal = now >= deadline ? "timeout" : null;
                 until = deadline;
@@ -343,6 +352,7 @@ public class Helper extends Instrumentation {
         String command = request.getString("cmd");
         if (!ACTIONS.contains(command)) return handleCommand(command, request);
         arm();
+        lastActionGlobal = command.equals("global");
         try {
             return handleCommand(command, request);
         } finally {
@@ -391,7 +401,8 @@ public class Helper extends Instrumentation {
             }
             case "next":
                 return next(request.getLong("frameTimeoutMs"), request.getLong("windowTimeoutMs"),
-                    request.getLong("gapMs"), request.getLong("drainMaxMs"));
+                    request.getLong("gapMs"), request.optLong("globalGapMs", request.getLong("gapMs")),
+                    request.getLong("drainMaxMs"));
             case "click":
                 return done(response, act(request, AccessibilityNodeInfo.ACTION_CLICK, false));
             case "longClick":
