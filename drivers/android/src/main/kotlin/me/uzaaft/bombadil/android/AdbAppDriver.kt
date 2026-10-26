@@ -6,6 +6,7 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -27,6 +28,12 @@ import java.io.File
  * is reported once two trees in a row agree; after each action, the state
  * is reported best effort, once the app has responded (see the helper's
  * `next`), even if it is still animating.
+ *
+ * With an agent ([AppAgent]), the agent reads and drives the app from
+ * inside its process while the app's windows are in front, and reports
+ * each state once the app's main thread and background workers are idle;
+ * the helper takes over when the app starts or finishes an activity, or
+ * something else is in front.
  *
  * Actions, externally tagged:
  * - `{"Tap": selector}` clicks the node [selector] picks; see [select].
@@ -83,6 +90,16 @@ class AdbAppDriver(
     private val windowTimeoutMs: Long = 1_000,
     /** Fallback: an app that never stops presenting frames is reported mid-animation after this long. */
     private val drainMaxMs: Long = 2_000,
+    /**
+     * The in-process agent's APK for this app (see `android-agent/package.sh`).
+     * Without it, the helper reads and drives the app from outside.
+     */
+    agentApk: File? = null,
+    /**
+     * Fallback: how long the agent waits for an app that never goes idle
+     * (an endless animation) before reporting it as it is.
+     */
+    private val agentCapMs: Long = 2_000,
     /** A file to append each step's timings to, as JSON lines. */
     private val timingLog: File? = null,
     override val stallTimeoutMs: Long? = 120_000,
@@ -90,6 +107,16 @@ class AdbAppDriver(
     override val name = "android-adb ($packageName on ${adb.serial})"
 
     private val helper = AndroidHelper(adb)
+    private val agent = agentApk?.let { AppAgent(adb, it, packageName) }
+
+    /** Whether the last state came from the agent, so that its node ids are the agent's. */
+    private var inAgent = false
+
+    /** The app's resumed activity in the last state from the agent. */
+    private var lastTop: String? = null
+
+    /** The current step's timings. */
+    private val step = LinkedHashMap<String, JsonElement>()
     private var state: JsonObject? = null
 
     override fun start(): JsonElement {
@@ -106,6 +133,11 @@ class AdbAppDriver(
             .lines().map { it.trim() }.lastOrNull { it.startsWith("$packageName/") }
             ?: error("$packageName has no launcher activity; is it installed?")
         helper.connect()
+        agent?.let {
+            it.install()
+            // Starts the app's process, with the agent in it.
+            it.start()
+        }
         val started = System.nanoTime()
         adb.shell("am start -W -n $activity")
         return settle(JsonNull, started, initial = true)
@@ -113,48 +145,62 @@ class AdbAppDriver(
 
     override fun apply(action: JsonElement): JsonElement {
         val started = System.nanoTime()
+        step.clear()
         val (tag, args) = when (action) {
             is JsonPrimitive -> action.content to JsonObject(emptyMap())
             is JsonObject -> action.entries.single().let { it.key to it.value.jsonObject }
             else -> error("not an action: $action")
         }
-        val result: JsonObject? = when (tag) {
-            "Tap" -> point(args)?.let { (x, y) -> helper.request("tap", "x" to x, "y" to y) }
-                ?: target(args)?.let { helper.request("click", "node" to it) }
-            "LongPress" -> target(args)?.let { helper.request("longClick", "node" to it) }
-            "TypeText" -> {
-                val into = args["into"]?.jsonObject?.let { target(it) ?: return settle(action, started) }
-                helper.request("setText", "node" to into, "text" to args.string("text"))
+        // The app's own windows are in front and the state came from the
+        // agent: act through it, inside the app. Otherwise through the helper.
+        val agent = agent?.takeIf { inAgent && it.connected }
+        val target: DeviceSocket = agent ?: helper
+        val via = if (agent != null) "agent" else "helper"
+        val capMs = "capMs" to agentCapMs
+        val result: JsonObject? = attempt(via) {
+            when (tag) {
+                "Tap" -> point(args)?.let { (x, y) -> target.request("tap", "x" to x, "y" to y, capMs) }
+                    ?: target(args)?.let { target.request("click", "node" to it, capMs) }
+                "LongPress" -> target(args)?.let { target.request("longClick", "node" to it, capMs) }
+                "TypeText" -> {
+                    val into = args["into"]?.jsonObject?.let { target(it) ?: return@attempt null }
+                    target.request("setText", "node" to into, "text" to args.string("text"), capMs)
+                }
+                "Scroll" -> scroll(args, target)
+                "Swipe" -> {
+                    val (x1, y1) = args.getValue("from").jsonArray.map { it.jsonPrimitive.int }
+                    val (x2, y2) = args.getValue("to").jsonArray.map { it.jsonPrimitive.int }
+                    target.request("swipe", "x1" to x1, "y1" to y1, "x2" to x2, "y2" to y2, "durationMs" to 300, capMs)
+                }
+                // Inside the app, Back is a key event the app handles before
+                // the agent replies; Home always leaves it, so the helper does it.
+                "Back" -> if (agent != null) agent.request("key", "code" to 4, capMs) else helper.request("global", "action" to "back")
+                "Home" -> helper.request("global", "action" to "home")
+                "Enter" -> target.request("key", "code" to 66, capMs)
+                else -> error("unknown action `$tag`")
             }
-            "Scroll" -> scroll(args)
-            "Swipe" -> {
-                val (x1, y1) = args.getValue("from").jsonArray.map { it.jsonPrimitive.int }
-                val (x2, y2) = args.getValue("to").jsonArray.map { it.jsonPrimitive.int }
-                helper.request("swipe", "x1" to x1, "y1" to y1, "x2" to x2, "y2" to y2, "durationMs" to 300)
-            }
-            "Back" -> helper.request("global", "action" to "back")
-            "Home" -> helper.request("global", "action" to "home")
-            "Enter" -> helper.request("key", "code" to 66)
-            else -> error("unknown action `$tag`")
         }
         if (result != null && result["done"]?.jsonPrimitive?.boolean == false) {
             log("$action not done: ${result["reason"]?.jsonPrimitive?.content}")
         }
-        return settle(action, started)
+        if (agent == null || tag == "Home") return settle(action, started, fromTop = if (agent != null) lastTop else null)
+        return settleAfterAgent(action, started, result)
     }
 
     override fun cancel() {
         helper.cancel()
+        agent?.cancel()
         adb.cancel()
     }
 
     override fun stop() {
         helper.close()
+        agent?.close()
         adb.resume()
         runCatching { adb.shell("am force-stop $packageName", timeoutSeconds = 3) }
     }
 
-    private fun scroll(args: JsonObject): JsonObject? {
+    private fun scroll(args: JsonObject, target: DeviceSocket): JsonObject? {
         val direction = args.string("direction") ?: "down"
         val id = args["node"]?.jsonPrimitive?.content
         val node = when {
@@ -163,7 +209,7 @@ class AdbAppDriver(
             else -> largestScrollable()
         }
         val percent = args["percent"]?.jsonPrimitive?.intOrNull
-        if (node != null && percent == null) return helper.request("scroll", "node" to node.id, "direction" to direction)
+        if (node != null && percent == null) return target.request("scroll", "node" to node.id, "direction" to direction, "capMs" to agentCapMs)
         val area = node?.bounds ?: screenBounds()
         val share = (percent ?: 50).coerceIn(1, 100) / 100.0
         // Keep clear of the area's edges, where system gestures and bars live.
@@ -182,8 +228,9 @@ class AdbAppDriver(
             "left" -> (left to cy) to (left + dx to cy)
             else -> error("unknown scroll direction in $args")
         }
-        return helper.request(
+        return target.request(
             "swipe", "x1" to from.first, "y1" to from.second, "x2" to to.first, "y2" to to.second, "durationMs" to 400,
+            "capMs" to agentCapMs,
         )
     }
 
@@ -244,44 +291,111 @@ class AdbAppDriver(
     }
 
     /**
-     * Returns the app's state after an action ([initial]: after launching
-     * it), recording how long each part took. After actions this is best
-     * effort, see the helper's `next`; the first state waits until two
-     * trees agree instead, so that sessions start from the same state.
+     * Returns the state after an action the helper performed ([initial]:
+     * after launching the app; [fromTop]: after the agent saw the app leave
+     * that activity, or Home), recording how long each part took. The
+     * helper waits for the response from outside the app (see its `next`
+     * and `await`); the first state waits until two trees agree instead,
+     * so that sessions start from the same state. If the app's own windows
+     * are then in front, the agent's view of them replaces the helper's.
      */
-    private fun settle(lastAction: JsonElement, started: Long, initial: Boolean = false): JsonElement {
+    private fun settle(lastAction: JsonElement, started: Long, initial: Boolean = false, fromTop: String? = null): JsonElement {
         val acted = System.nanoTime()
-        val response = if (initial) {
-            helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
-        } else {
-            helper.request(
-                "next", "gapMs" to gapMs, "foreignGapMs" to foreignGapMs, "appPackage" to packageName, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
-                "drainMaxMs" to drainMaxMs,
+        val response = when {
+            initial -> helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
+            fromTop != null -> helper.request("await", "fromTop" to fromTop, "gapMs" to gapMs, "windowTimeoutMs" to windowTimeoutMs)
+            else -> helper.request(
+                "next", "gapMs" to gapMs, "foreignGapMs" to foreignGapMs, "appPackage" to packageName,
+                "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs, "drainMaxMs" to drainMaxMs,
             )
         }
-        val fetched = System.nanoTime()
+        record(if (initial) "settle" else if (fromTop != null) "await" else "next", response, helper, acted)
+        inAgent = false
         val fresh = response.getValue("state").jsonObject
-        state = fresh
-        timingLog?.let { log ->
-            val rttMs = (fetched - acted) / 1_000_000.0
-            val fields = response.filterKeys { it != "state" && it != "ok" }
-            val onDevice = if (initial) fields.getValue("ms").jsonPrimitive.content.toDouble()
-            else fields.getValue("waitMs").jsonPrimitive.content.toDouble() + fields.getValue("buildMs").jsonPrimitive.content.toDouble()
-            log.appendText(
-                JsonObject(
-                    fields + mapOf(
-                        "initial" to JsonPrimitive(initial),
-                        "actionMs" to JsonPrimitive((acted - started) / 1_000_000.0),
-                        "requestMs" to JsonPrimitive(rttMs),
-                        // The host side of the request: transfer, plus parsing on the host.
-                        "transferMs" to JsonPrimitive(rttMs - onDevice),
-                        "parseMs" to JsonPrimitive(helper.lastParseMs),
-                        "bytes" to JsonPrimitive(helper.lastResponseBytes),
-                        "totalMs" to JsonPrimitive((System.nanoTime() - started) / 1_000_000.0),
-                    ),
-                ).toString() + "\n",
-            )
+        val inApp = fresh["package"]?.jsonPrimitive?.contentOrNull == packageName
+        return finish(lastAction, started, initial, (if (inApp) agentState() else null) ?: fresh)
+    }
+
+    /**
+     * Returns the state after an action the agent performed: its own view
+     * of the app once the app's main thread is idle, or, if the app is
+     * leaving its activity (another one starting, or this one finishing),
+     * the helper's view once the system has switched activities.
+     */
+    private fun settleAfterAgent(lastAction: JsonElement, started: Long, result: JsonObject?): JsonElement {
+        if (result != null) record("agent", result, agent!!, started)
+        val leaving = result?.get("leaving")?.jsonPrimitive?.boolean == true
+        if (leaving) return settle(lastAction, started, fromTop = result!!["from"]?.jsonPrimitive?.contentOrNull ?: lastTop)
+        val state = result?.let { agentResult(it) }
+        if (state != null) return finish(lastAction, started, false, state)
+        // The agent is gone (the app crashed), its tree couldn't be read, or
+        // something outside the app is in front: back to the helper, waiting
+        // for quiet as at the start of a session.
+        val acted = System.nanoTime()
+        val response = helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
+        record("settle", response, helper, acted)
+        inAgent = false
+        return finish(lastAction, started, false, response.getValue("state").jsonObject)
+    }
+
+    /** The agent's state of the app, if it has one: its windows are in front and its main thread answers. */
+    private fun agentState(): JsonObject? {
+        val agent = agent?.takeIf { it.connected } ?: return null
+        val acted = System.nanoTime()
+        val response = attempt("agent") { agent.request("state", "capMs" to agentCapMs) } ?: return null
+        record("agentState", response, agent, acted)
+        return agentResult(response)
+    }
+
+    private fun agentResult(response: JsonObject): JsonObject? {
+        val state = response["state"]?.jsonObject
+        if (state == null || response["focused"]?.jsonPrimitive?.boolean != true) {
+            inAgent = false
+            return null
         }
+        inAgent = true
+        lastTop = response["top"]?.jsonPrimitive?.contentOrNull
+        return state
+    }
+
+    /** Runs a request to the agent, or, if it fails (the app died), forgets the agent for this session. */
+    private fun <T> attempt(via: String, block: () -> T): T? {
+        if (via != "agent") return block()
+        return try {
+            block()
+        } catch (e: IllegalStateException) {
+            log("the agent failed, using the helper: ${e.message}")
+            agent?.close()
+            inAgent = false
+            null
+        }
+    }
+
+    /** Adds a response's timings to the step's, as `<what>.<key>`. */
+    private fun record(what: String, response: JsonObject, socket: DeviceSocket, sent: Long) {
+        if (timingLog == null) return
+        for ((key, value) in response) {
+            if (key == "state" || key == "ok" || value !is JsonPrimitive) continue
+            step["$what.$key"] = value
+        }
+        step["$what.requestMs"] = JsonPrimitive((System.nanoTime() - sent) / 1_000_000.0)
+        step["$what.bytes"] = JsonPrimitive(socket.lastResponseBytes)
+        step["$what.parseMs"] = JsonPrimitive(socket.lastParseMs)
+        step["path"] = JsonPrimitive(listOfNotNull(step["path"]?.jsonPrimitive?.content, what).joinToString("+"))
+    }
+
+    private fun finish(lastAction: JsonElement, started: Long, initial: Boolean, fresh: JsonObject): JsonElement {
+        state = fresh
+        timingLog?.appendText(
+            JsonObject(
+                step + mapOf(
+                    "initial" to JsonPrimitive(initial),
+                    "inAgent" to JsonPrimitive(inAgent),
+                    "totalMs" to JsonPrimitive((System.nanoTime() - started) / 1_000_000.0),
+                ),
+            ).toString() + "\n",
+        )
+        step.clear()
         return JsonObject(fresh + ("lastAction" to lastAction))
     }
 
@@ -306,7 +420,7 @@ class AdbAppDriver(
  * Runs an [AdbAppDriver] for one Bombadil session.
  *
  * ```
- * bombadil-android --package <package> [--apk <file>] [--grant <permission>]...
+ * bombadil-android --package <package> [--apk <file>] [--agent <apk>] [--grant <permission>]...
  * ```
  *
  * The device is the first serial in `BOMBADIL_ANDROID_SERIALS`
@@ -318,6 +432,7 @@ class AdbAppDriver(
 fun main(args: Array<String>) {
     var packageName: String? = null
     var apk: String? = null
+    var agentApk: File? = null
     val permissions = mutableListOf<String>()
     val rest = args.iterator()
     while (rest.hasNext()) {
@@ -325,6 +440,7 @@ fun main(args: Array<String>) {
             "--package" -> packageName = rest.next()
             "--apk" -> apk = rest.next()
             "--grant" -> permissions += rest.next()
+            "--agent" -> agentApk = File(rest.next())
             else -> error("unknown argument `$arg`")
         }
     }
@@ -337,6 +453,7 @@ fun main(args: Array<String>) {
             apk,
             permissions,
             timingLog = System.getenv("BOMBADIL_ANDROID_TIMINGS")?.let(::File),
+            agentApk = agentApk,
         ),
     )
 }

@@ -13,7 +13,12 @@ if [[ -z ${BOMBADIL_ANDROID_SERIALS:-} ]]; then
   export BOMBADIL_ANDROID_SERIALS
 fi
 
+# NIA_NO_AGENT=1: drive the app from outside only, through the helper.
+agent=(--agent "$NIA_AGENT")
+if [[ -n ${NIA_NO_AGENT:-} ]]; then agent=(); fi
+
 exec "$repo/build/install/bombadil-compose/bin/bombadil-android" \
   --package "$NIA_PACKAGE" \
   --apk "$NIA_APK" \
+  "${agent[@]}" \
   --grant android.permission.POST_NOTIFICATIONS

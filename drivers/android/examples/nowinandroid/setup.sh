@@ -36,7 +36,9 @@ if [[ ! -f $NIA_APK || -n $(find "$NIA_DIR" -newer "$NIA_APK" -name '*.kt' -not 
   (cd "$NIA_DIR" && ./gradlew --console=plain :app:assembleDemoDebug)
 fi
 
-(cd "$repo" && gradle --console=plain -q installDist)
+(cd "$repo" && gradle --console=plain -q installDist agentDex)
+# The agent runs inside the app, so it must carry the app's signature.
+"$repo/android-agent/package.sh" "$repo/build/agent/dex" "$NIA_PACKAGE" "$NIA_KEYSTORE" "$NIA_AGENT"
 
 mkdir -p "$ANDROID_AVD_HOME"
 if [[ ! -d $ANDROID_AVD_HOME/$AVD_NAME.avd ]]; then
