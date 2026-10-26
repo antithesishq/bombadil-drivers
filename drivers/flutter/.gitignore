@@ -1,5 +1,6 @@
 .dart_tool/
 pubspec.lock
 .direnv/
-/embedder/target/
 /examples/*/out/
+/examples/*/build/
+/build/

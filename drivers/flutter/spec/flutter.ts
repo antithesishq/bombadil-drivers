@@ -1,10 +1,19 @@
-// Specification helpers for apps run by bombadil-flutter-driver: the
+// Specification helpers for apps run by the bombadil_flutter driver: the
 // state it reports, and action generators for the semantics nodes that
 // are on screen.
 import { actions, extract, string, weighted } from "@antithesishq/bombadil/external";
 
 export type Node = {
-  id: number;
+  /**
+   * Derived from what the node is (its role, label and ancestry), so it
+   * is the same across runs: target actions with it.
+   */
+  id: string;
+  /**
+   * Flutter's own id for the node. It tells apart nodes that look alike
+   * (such as two routes' scopes) within a run, but not across runs.
+   */
+  flutterId: number;
   label?: string;
   value?: string;
   hint?: string;
@@ -97,5 +106,5 @@ export const explore = weighted([
  */
 export const topScope = extract((s: State) => {
   const scopes = flatten(s.tree).filter((n) => n.flags.includes("scopesRoute"));
-  return scopes.length > 0 ? scopes[scopes.length - 1].id : null;
+  return scopes.length > 0 ? scopes[scopes.length - 1].flutterId : null;
 });

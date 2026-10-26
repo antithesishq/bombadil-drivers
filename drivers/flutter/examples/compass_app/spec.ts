@@ -1,5 +1,5 @@
 // Properties of flutter/samples' compass_app, run through
-// bombadil-flutter-driver. See the README for how to run it.
+// the bombadil_flutter driver. See the README for how to run it.
 import { always, next, now } from "@antithesishq/bombadil";
 import {
   errors,

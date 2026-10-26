@@ -1,4 +1,4 @@
-// A specification for any app run by bombadil-flutter-driver: explore what
+// A specification for any app run by the bombadil_flutter driver: explore what
 // is on screen and check that the app never logs an error.
 import { always } from "@antithesishq/bombadil";
 import { errors, explore, lastAction } from "./flutter.ts";
