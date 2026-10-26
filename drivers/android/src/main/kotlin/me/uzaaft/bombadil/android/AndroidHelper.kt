@@ -20,10 +20,16 @@ import java.security.MessageDigest
  * Requests are objects with a `cmd`; every response has `ok`, and `error`
  * when it's false:
  * - `ping` → `apkSha256` of the running helper.
- * - `waitForIdle` `quietMs` `timeoutMs` → `idle`, `ms`: waits until no
- *   accessibility event has arrived for `quietMs` since the request.
  * - `tree` → `state` (focused package, activity and window title, and the
  *   pruned node tree of every interactive window), `buildMs`.
+ * - `settle` `quietMs` `timeoutMs` → `state`, `stable`, `trees`: waits for
+ *   `quietMs` without accessibility events and fetches the tree, until two
+ *   trees agree. For a session's first state.
+ * - `next` `gapMs` `frameTimeoutMs` `windowTimeoutMs` `drainMaxMs` →
+ *   `state`, `signal` (`frame`, `window`, `timeout`, `windowCap`,
+ *   `drainCap`), `waitMs`, `firstFrameMs`, `frames`, `buildMs`: after an
+ *   action, waits for the app's response (frames presented, or a window
+ *   change) and returns the tree, best effort.
  * - `click`/`longClick` `node`, `setText` `node`? `text` `replace`?,
  *   `scroll` `node` `direction` → `done`, then `via` (`action` or
  *   `input`) or `reason`: an accessibility action on the node from the

@@ -23,9 +23,10 @@ import java.io.File
  * accessibility actions on nodes (falling back to injected touches), text
  * input, swipes and global actions.
  *
- * Each session clears the app's data and launches it fresh, and reports
- * each state once two trees fetched [quietMs] after the last accessibility
- * event agree.
+ * Each session clears the app's data and launches it fresh. The first state
+ * is reported once two trees in a row agree; after each action, the state
+ * is reported best effort, once the app has responded (see the helper's
+ * `next`), even if it is still animating.
  *
  * Actions, externally tagged:
  * - `{"Tap": selector}` clicks the node [selector] picks; see [select].
@@ -51,12 +52,24 @@ class AdbAppDriver(
     /** Permissions granted before launching, so their prompts don't block the app. */
     private val permissions: List<String> = emptyList(),
     /**
-     * How long the app must go without an accessibility event before the
-     * driver fetches the tree; it does so until two trees in a row agree.
+     * For the first state of a session: how long the app must go without an
+     * accessibility event before the driver fetches the tree, which it does
+     * until two trees in a row agree, and for how long at most.
      */
     private val quietMs: Long = 200,
-    /** How long to wait for that at most, for apps that never settle. */
     private val settleTimeoutMs: Long = 10_000,
+    /**
+     * After an action: the app has finished responding once its windows
+     * have presented no frame for this long (three refresh periods at 60Hz),
+     * or, after a window change, sent no accessibility event for this long.
+     */
+    private val gapMs: Long = 50,
+    /** Fallback: no frame within this long means the action changed nothing visible. */
+    private val frameTimeoutMs: Long = 200,
+    /** Fallback: a window change that never goes quiet is reported after this long. */
+    private val windowTimeoutMs: Long = 1_000,
+    /** Fallback: an app that never stops presenting frames is reported mid-animation after this long. */
+    private val drainMaxMs: Long = 2_000,
     /** A file to append each step's timings to, as JSON lines. */
     private val timingLog: File? = null,
     override val stallTimeoutMs: Long? = 120_000,
@@ -82,7 +95,7 @@ class AdbAppDriver(
         helper.connect()
         val started = System.nanoTime()
         adb.shell("am start -W -n $activity")
-        return settle(JsonNull, started)
+        return settle(JsonNull, started, initial = true)
     }
 
     override fun apply(action: JsonElement): JsonElement {
@@ -217,23 +230,43 @@ class AdbAppDriver(
         return node
     }
 
-    /** Waits for the app to settle and returns its state, recording how long each part took. */
-    private fun settle(lastAction: JsonElement, started: Long): JsonElement {
+    /**
+     * Returns the app's state after an action ([initial]: after launching
+     * it), recording how long each part took. After actions this is best
+     * effort, see the helper's `next`; the first state waits until two
+     * trees agree instead, so that sessions start from the same state.
+     */
+    private fun settle(lastAction: JsonElement, started: Long, initial: Boolean = false): JsonElement {
         val acted = System.nanoTime()
-        val settled = helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
+        val response = if (initial) {
+            helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
+        } else {
+            helper.request(
+                "next", "gapMs" to gapMs, "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs,
+                "drainMaxMs" to drainMaxMs,
+            )
+        }
         val fetched = System.nanoTime()
-        if (settled["stable"]?.jsonPrimitive?.boolean == false) log("the UI didn't settle within ${settleTimeoutMs}ms")
-        val fresh = settled.getValue("state").jsonObject
+        val fresh = response.getValue("state").jsonObject
         state = fresh
         timingLog?.let { log ->
-            fun field(key: String) = settled.getValue(key).jsonPrimitive.content
             val rttMs = (fetched - acted) / 1_000_000.0
+            val fields = response.filterKeys { it != "state" && it != "ok" }
+            val onDevice = if (initial) fields.getValue("ms").jsonPrimitive.content.toDouble()
+            else fields.getValue("waitMs").jsonPrimitive.content.toDouble() + fields.getValue("buildMs").jsonPrimitive.content.toDouble()
             log.appendText(
-                "{\"actionMs\":${(acted - started) / 1_000_000.0},\"settleMs\":$rttMs,\"trees\":${field("trees")}," +
-                    "\"idleMs\":${field("idleMs")},\"buildMs\":${field("buildMs")}," +
-                    // Time on the host side of the request: transfer, plus parsing on the host.
-                    "\"transferMs\":${rttMs - field("ms").toDouble()},\"parseMs\":${helper.lastParseMs}," +
-                    "\"bytes\":${helper.lastResponseBytes},\"totalMs\":${(System.nanoTime() - started) / 1_000_000.0}}\n",
+                JsonObject(
+                    fields + mapOf(
+                        "initial" to JsonPrimitive(initial),
+                        "actionMs" to JsonPrimitive((acted - started) / 1_000_000.0),
+                        "requestMs" to JsonPrimitive(rttMs),
+                        // The host side of the request: transfer, plus parsing on the host.
+                        "transferMs" to JsonPrimitive(rttMs - onDevice),
+                        "parseMs" to JsonPrimitive(helper.lastParseMs),
+                        "bytes" to JsonPrimitive(helper.lastResponseBytes),
+                        "totalMs" to JsonPrimitive((System.nanoTime() - started) / 1_000_000.0),
+                    ),
+                ).toString() + "\n",
             )
         }
         return JsonObject(fresh + ("lastAction" to lastAction))

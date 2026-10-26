@@ -16,6 +16,7 @@ import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.WindowContentFrameStats;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction;
@@ -32,6 +33,9 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -112,14 +116,178 @@ public class Helper extends Instrumentation {
 
     private final Object idleLock = new Object();
     private long lastEventTime;
-    private volatile long eventCount;
+    private long lastEventNanos;
+
+    /** Window changes (windows added, removed or focused; activities and dialogs shown) seen so far. */
+    private volatile long windowChanges;
 
     private void onEvent(AccessibilityEvent event) {
         synchronized (idleLock) {
             lastEventTime = SystemClock.uptimeMillis();
-            eventCount++;
+            lastEventNanos = System.nanoTime();
+            int type = event.getEventType();
+            if (type == AccessibilityEvent.TYPE_WINDOWS_CHANGED || type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                windowChanges++;
+            }
+            idleLock.notifyAll();
         }
         trackActivity(event);
+    }
+
+    // Waiting for the response to an action
+
+    /** When the last action finished, in System.nanoTime(), the time base of frame stats. */
+    private volatile long actedAt;
+    /** The windows whose frame stats were cleared before the last action. */
+    private final Set<Integer> armedWindows = new HashSet<>();
+    private long windowChangesAtArm;
+    private long refreshNanos = 16_666_667;
+
+    /** The windows that can respond to an action: the app's and the keyboard. */
+    private Set<Integer> respondingWindows() {
+        Set<Integer> ids = new HashSet<>();
+        for (AccessibilityWindowInfo w : ui.getWindows()) {
+            int type = w.getType();
+            if (type == AccessibilityWindowInfo.TYPE_APPLICATION || type == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                ids.add(w.getId());
+            }
+        }
+        return ids;
+    }
+
+    private boolean hasActiveWindow() {
+        for (AccessibilityWindowInfo w : ui.getWindows()) {
+            if (w.isActive() && w.getRoot() != null) return true;
+        }
+        return false;
+    }
+
+    /** Before an action: forgets the frames shown so far, so that the next ones stand out. */
+    private void arm() {
+        armedWindows.clear();
+        for (int id : respondingWindows()) {
+            ui.clearWindowContentFrameStats(id);
+            armedWindows.add(id);
+        }
+        windowChangesAtArm = windowChanges;
+    }
+
+    /**
+     * After an action: waits for the app's response and returns the tree,
+     * best effort, in the spirit of Bombadil's browser and terminal drivers:
+     * it waits for the response to happen, not for the app to stop changing.
+     * If the app is still animating, the next state shows the rest.
+     *
+     * Before the action, [arm] clears the frame stats of the app's windows
+     * and the keyboard. Afterwards the signal is one of:
+     * - Frames: a watched window has presented a frame after the action, and
+     *   no further frame has followed within [gapMs] (a few refresh
+     *   periods), like the terminal driver reading output until the program
+     *   stops writing. Frames cover content changes that send no
+     *   accessibility events (most of Compose's).
+     * - A window change (TYPE_WINDOWS_CHANGED or TYPE_WINDOW_STATE_CHANGED:
+     *   an activity, dialog or keyboard coming or going): the response is
+     *   over once accessibility events and frames pause for [gapMs] and a
+     *   window is active. New windows aren't polled for frame stats: on API
+     *   35 that delayed a dialog's first frame by most of a second.
+     * Accessibility events wake the wait up; between them it polls the
+     * frame stats once per refresh period.
+     *
+     * Fallbacks, none of which is the mechanism:
+     * - [frameTimeoutMs]: no frame and no window change at all, so the
+     *   action changed nothing visible; the tree is reported as it is.
+     * - [windowTimeoutMs]: a window change that never goes quiet, or leaves
+     *   no window active, is reported after this long.
+     * - [drainMaxMs]: an app that animates without pause never ends its
+     *   burst of frames; the tree is reported mid-animation.
+     */
+    private String next(long frameTimeoutMs, long windowTimeoutMs, long gapMs, long drainMaxMs) throws Exception {
+        long start = System.nanoTime();
+        long since = actedAt == 0 ? start : actedAt;
+        long deadline = start + frameTimeoutMs * 1_000_000;
+        long drainDeadline = start + drainMaxMs * 1_000_000;
+        long gap = gapMs * 1_000_000;
+        boolean windowChanged = false;
+        // Frames seen per window: a window can stop reporting stats once
+        // another covers it (it leaves the interactive windows), so keep counts.
+        Map<Integer, Integer> seenByWindow = new HashMap<>();
+        long firstFrame = -1, lastFrame = -1;
+        int polls = 0, frames = 0;
+        String signal;
+        while (true) {
+            long now = System.nanoTime();
+            if (!windowChanged && windowChanges != windowChangesAtArm) windowChanged = true;
+            if (windowChanged) {
+                // A window came or went: that is the response. New windows
+                // are not polled for frames (doing so delayed a dialog's
+                // first frame by most of a second on API 35); instead wait
+                // until accessibility events pause for a gap, as the
+                // window's content reports itself.
+                long lastEvent;
+                synchronized (idleLock) {
+                    lastEvent = lastEventNanos;
+                }
+                long quietSince = Math.max(lastEvent, lastFrame);
+                // Between one app's window going and another's coming (an
+                // article opening in the browser), no window is active yet:
+                // that's not a state worth reporting, so keep waiting.
+                if (now - quietSince >= gap && hasActiveWindow()) {
+                    signal = "window";
+                    break;
+                }
+                if (now >= start + windowTimeoutMs * 1_000_000) {
+                    signal = "windowCap";
+                    break;
+                }
+                synchronized (idleLock) {
+                    idleLock.wait(Math.max(1, Math.min(refreshNanos, quietSince + gap - now) / 1_000_000));
+                }
+                continue;
+            }
+            polls++;
+            for (int id : armedWindows) {
+                WindowContentFrameStats stats = ui.getWindowContentFrameStats(id);
+                if (stats == null) continue;
+                if (stats.getRefreshPeriodNano() > 0) refreshNanos = stats.getRefreshPeriodNano();
+                int n = 0;
+                for (int i = 0; i < stats.getFrameCount(); i++) {
+                    long presented = stats.getFramePresentedTimeNano(i);
+                    if (presented <= since) continue; // Before the action, or not presented yet (-1).
+                    n++;
+                    if (firstFrame < 0 || presented < firstFrame) firstFrame = presented;
+                    if (presented > lastFrame) lastFrame = presented;
+                }
+                seenByWindow.merge(id, n, Math::max);
+            }
+            frames = 0;
+            for (int n : seenByWindow.values()) frames += n;
+            now = System.nanoTime();
+            if (frames > 0 && now - lastFrame >= gap) {
+                signal = "frame";
+                break;
+            }
+            if (frames > 0 && now >= drainDeadline) {
+                signal = "drainCap";
+                break;
+            }
+            if (frames == 0 && now >= deadline) {
+                signal = "timeout";
+                break;
+            }
+            long until = frames > 0 ? Math.min(lastFrame + gap, drainDeadline) : deadline;
+            synchronized (idleLock) {
+                idleLock.wait(Math.max(1, Math.min(refreshNanos, until - now) / 1_000_000));
+            }
+        }
+        long waited = System.nanoTime();
+        String tree = tree();
+        long built = System.nanoTime();
+        return "{\"ok\":true,\"signal\":\"" + signal + "\",\"waitMs\":" + (waited - start) / 1e6
+            + ",\"sinceActionMs\":" + (waited - since) / 1e6
+            + ",\"firstFrameMs\":" + (firstFrame < 0 ? -1 : (firstFrame - since) / 1e6)
+            + ",\"lastFrameMs\":" + (lastFrame < 0 ? -1 : (lastFrame - since) / 1e6)
+            + ",\"frames\":" + frames + ",\"polls\":" + polls + ",\"buildMs\":" + (built - waited) / 1e6
+            + ",\"state\":" + tree + "}";
     }
 
     /** Remembers the last activity shown, from window state changes. */
@@ -165,8 +333,21 @@ public class Helper extends Instrumentation {
         }
     }
 
+    private static final Set<String> ACTIONS = new HashSet<>(Arrays.asList(
+        "click", "longClick", "setText", "scroll", "tap", "swipe", "global", "key"));
+
     private String handle(JSONObject request) throws Exception {
         String command = request.getString("cmd");
+        if (!ACTIONS.contains(command)) return handleCommand(command, request);
+        arm();
+        try {
+            return handleCommand(command, request);
+        } finally {
+            actedAt = System.nanoTime();
+        }
+    }
+
+    private String handleCommand(String command, JSONObject request) throws Exception {
         JSONObject response = new JSONObject().put("ok", true);
         switch (command) {
             case "ping":
@@ -177,16 +358,11 @@ public class Helper extends Instrumentation {
                 // Spliced in rather than parsed, to save the time.
                 return "{\"ok\":true,\"buildMs\":" + (SystemClock.uptimeMillis() - start) + ",\"state\":" + tree + "}";
             }
-            case "waitForIdle": {
-                long start = SystemClock.uptimeMillis();
-                long events = eventCount;
-                boolean idle = waitForIdle(start, request.getLong("quietMs"), request.getLong("timeoutMs"));
-                return response.put("idle", idle).put("events", eventCount - events).put("ms", SystemClock.uptimeMillis() - start).toString();
-            }
             case "settle": {
-                // Waits for quiet and fetches the tree until two trees in a
-                // row agree: apps (Compose among them) don't send events
-                // for every change, so quiet alone doesn't mean settled.
+                // For the first state of a session only: waits for quiet and
+                // fetches the tree until two trees in a row agree, so that
+                // every session starts from the same state. After actions,
+                // `next` is used instead.
                 long start = SystemClock.uptimeMillis();
                 long quietMs = request.getLong("quietMs");
                 long deadline = start + request.getLong("timeoutMs");
@@ -210,6 +386,9 @@ public class Helper extends Instrumentation {
                     + idleMs + ",\"buildMs\":" + buildMs + ",\"ms\":" + (SystemClock.uptimeMillis() - start)
                     + ",\"state\":" + tree + "}";
             }
+            case "next":
+                return next(request.getLong("frameTimeoutMs"), request.getLong("windowTimeoutMs"),
+                    request.getLong("gapMs"), request.getLong("drainMaxMs"));
             case "click":
                 return done(response, act(request, AccessibilityNodeInfo.ACTION_CLICK, false));
             case "longClick":
