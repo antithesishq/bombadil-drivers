@@ -25,24 +25,24 @@ abstract interface class BombadilDriver {
 
 /// Runs [driver] for one Bombadil session over [input] and [output]
 /// (stdin and stdout by default), until Bombadil terminates it or closes
-/// [input].
+/// [input]. [stallTimeout] goes to Bombadil in the handshake.
 ///
 /// Errors from the driver are reported to Bombadil and rethrown.
 Future<void> runDriver(
   BombadilDriver driver, {
   Stream<List<int>>? input,
   IOSink? output,
+  Duration? stallTimeout,
 }) async {
   final sink = output ?? stdout;
-  void send(DriverMessage message) =>
-      sink.writeln(jsonEncode(message.toJson()));
+  void send(DriverMessage message) => sink.writeln(message.encode());
 
   final lines = (input ?? stdin)
       .transform(utf8.decoder)
       .transform(const LineSplitter())
       .where((line) => line.trim().isNotEmpty);
 
-  send(Hello(driver.name));
+  send(Hello(driver.name, stallTimeout: stallTimeout));
   try {
     send(State(await driver.start()));
     await for (final line in lines) {

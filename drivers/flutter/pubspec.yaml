@@ -1,10 +1,17 @@
 name: bombadil_flutter
-description: Write Bombadil external drivers for Flutter apps in Dart.
-version: 0.1.0
+description: >-
+  A Bombadil external driver that runs inside a Flutter app: states are its
+  semantics tree, actions are semantics actions.
+version: 0.2.0
 publish_to: none
 
 environment:
-  sdk: ^3.4.0
+  sdk: ^3.10.0
+  flutter: ">=3.38.0"
 
-dev_dependencies:
-  test: ^1.25.0
+dependencies:
+  flutter:
+    sdk: flutter
+  # For TestPlatformDispatcher, which overrides the view's metrics.
+  flutter_test:
+    sdk: flutter

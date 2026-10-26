@@ -1,0 +1,5 @@
+analyzer:
+  exclude:
+    - examples/*/out/**
+    - examples/*/build/**
+    - build/**

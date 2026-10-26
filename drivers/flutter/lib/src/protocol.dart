@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 /// Version of Bombadil's external driver protocol this package speaks.
 const protocolVersion = 0;
 
@@ -6,26 +8,58 @@ sealed class DriverMessage {
   const DriverMessage();
 
   Map<String, Object?> toJson();
+
+  /// The message as one line of JSON, without the newline.
+  String encode() => jsonEncode(toJson());
 }
 
 class Hello extends DriverMessage {
-  const Hello(this.name);
+  const Hello(this.name, {this.stallTimeout});
 
   final String name;
 
+  /// How long Bombadil should wait for a state before it considers the
+  /// driver stalled, if not its default.
+  final Duration? stallTimeout;
+
   @override
-  Map<String, Object?> toJson() =>
-      {'type': 'hello', 'protocol': protocolVersion, 'name': name};
+  Map<String, Object?> toJson() => {
+    'type': 'hello',
+    'protocol': protocolVersion,
+    'name': name,
+    if (stallTimeout case final timeout?)
+      'stall_timeout_ms': timeout.inMilliseconds,
+  };
 }
 
 class State extends DriverMessage {
   const State(this.state);
 
-  /// Any JSON-encodable value describing the app.
+  /// Any JSON-encodable value describing the app, or [EncodedJson].
   final Object? state;
 
   @override
-  Map<String, Object?> toJson() => {'type': 'state', 'state': state};
+  Map<String, Object?> toJson() => {
+    'type': 'state',
+    'state': switch (state) {
+      EncodedJson(:final json) => jsonDecode(json),
+      final state => state,
+    },
+  };
+
+  @override
+  String encode() => switch (state) {
+    EncodedJson(:final json) => '{"type":"state","state":$json}',
+    _ => super.encode(),
+  };
+}
+
+/// A state the driver has already encoded as JSON, so that it can time or
+/// reuse the encoding.
+class EncodedJson {
+  const EncodedJson(this.json);
+
+  final String json;
 }
 
 class DriverError extends DriverMessage {

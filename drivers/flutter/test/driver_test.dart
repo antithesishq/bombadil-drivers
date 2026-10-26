@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:bombadil_flutter/bombadil_flutter.dart';
-import 'package:test/test.dart';
+import 'package:flutter_test/flutter_test.dart';
 
 class FakeDriver implements BombadilDriver {
   final applied = <Object?>[];
@@ -29,7 +29,9 @@ class FakeDriver implements BombadilDriver {
 /// Runs [driver] on [input] lines and returns the messages it sent, and the
 /// error it failed with.
 Future<(List<Object?>, Object?)> session(
-    BombadilDriver driver, List<String> input) async {
+  BombadilDriver driver,
+  List<String> input,
+) async {
   final output = StreamController<List<int>>();
   final sent = output.stream
       .transform(utf8.decoder)
@@ -64,20 +66,20 @@ void main() {
       {'type': 'hello', 'protocol': 0, 'name': 'fake'},
       {
         'type': 'state',
-        'state': {'applied': 0}
+        'state': {'applied': 0},
       },
       {
         'type': 'state',
-        'state': {'applied': 1}
+        'state': {'applied': 1},
       },
       {
         'type': 'state',
-        'state': {'applied': 2}
+        'state': {'applied': 2},
       },
     ]);
     expect(driver.applied, [
       {
-        'Tap': {'id': 'ok'}
+        'Tap': {'id': 'ok'},
       },
       'Back',
     ]);
@@ -87,8 +89,9 @@ void main() {
 
   test('reports driver errors to Bombadil and stops the app', () async {
     final driver = FakeDriver();
-    final (sent, error) =
-        await session(driver, ['{"type":"apply","action":"Crash"}']);
+    final (sent, error) = await session(driver, [
+      '{"type":"apply","action":"Crash"}',
+    ]);
     expect(error, isStateError);
     expect(sent.last, {'type': 'error', 'message': 'Bad state: crashed'});
     expect(driver.stopped, isTrue);
