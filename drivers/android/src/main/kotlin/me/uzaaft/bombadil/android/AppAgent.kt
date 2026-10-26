@@ -21,6 +21,12 @@ import java.security.MessageDigest
  *   activity the app is leaving: it started another or is finishing this
  *   one, and the system takes over), or the same as `state`.
  *
+ * Unless [allowExternalActivities], the agent blocks activity starts that
+ * would leave the app (a link opened in the browser, a share sheet) before
+ * the other app launches, and every response lists those blocked since
+ * the previous one in `blocked`: `[{action, data, package}]`, `package`
+ * being where it would have gone (null if nowhere).
+ *
  * `state`'s responses: `settled` (false if the cap was reached; `busy`
  * says with what: `recomposer`, `layout`, `queue`, `focus`, `blocked`), `waitMs`,
  * `rounds`, `buildMs`, `focused` (whether the app's front window that takes
@@ -31,7 +37,13 @@ import java.security.MessageDigest
  * Starting the agent (re)starts the app's process: it runs from the
  * process's start, so that it sees every window the app creates.
  */
-class AppAgent(adb: Adb, private val apk: File, appPackage: String) : DeviceSocket(adb, SOCKET) {
+class AppAgent(
+    adb: Adb,
+    private val apk: File,
+    appPackage: String,
+    /** Let the app start other apps' activities instead of blocking them (see the agent). */
+    private val allowExternalActivities: Boolean = false,
+) : DeviceSocket(adb, SOCKET) {
     private val agentPackage = "$appPackage.bombadil"
 
     /** Installs the agent if the device doesn't have this build of it. */
@@ -45,7 +57,7 @@ class AppAgent(adb: Adb, private val apk: File, appPackage: String) : DeviceSock
     /** Starts the app's process with the agent in it, and connects. The app must not be running. */
     fun start() {
         close()
-        adb.run("shell", "nohup am instrument -w $agentPackage/$CLASS >/dev/null 2>&1 &")
+        adb.run("shell", "nohup am instrument -w -e allowExternalActivities $allowExternalActivities $agentPackage/$CLASS >/dev/null 2>&1 &")
         await(30_000, "the agent") { request("ping")["ok"] != null }
     }
 

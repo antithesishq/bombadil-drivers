@@ -106,6 +106,12 @@ class AdbAppDriver(
      * (an endless animation) before reporting it as it is.
      */
     private val agentCapMs: Long = 2_000,
+    /**
+     * Let the app start other apps' activities (the browser for a link).
+     * By default the agent blocks them, so that tests stay in the app, and
+     * each state lists the blocked ones in `blockedIntents`.
+     */
+    allowExternalActivities: Boolean = false,
     /** A file to append each step's timings to, as JSON lines. */
     private val timingLog: File? = null,
     override val stallTimeoutMs: Long? = 120_000,
@@ -113,7 +119,7 @@ class AdbAppDriver(
     override val name = "android-adb ($packageName on ${adb.serial})"
 
     private val helper = AndroidHelper(adb)
-    private val agent = agentApk?.let { AppAgent(adb, it, packageName) }
+    private val agent = agentApk?.let { AppAgent(adb, it, packageName, allowExternalActivities) }
 
     /** Whether the last state came from the agent, so that its node ids are the agent's. */
     private var inAgent = false
@@ -123,6 +129,9 @@ class AdbAppDriver(
 
     /** The current step's timings. */
     private val step = LinkedHashMap<String, JsonElement>()
+
+    /** Hand-offs the agent blocked during the current step. */
+    private val blockedIntents = ArrayList<JsonElement>()
     private var state: JsonObject? = null
 
     override fun start(): JsonElement {
@@ -382,6 +391,7 @@ class AdbAppDriver(
 
     /** Adds a response's timings to the step's, as `<what>.<key>`. */
     private fun record(what: String, response: JsonObject, socket: DeviceSocket, sent: Long) {
+        (response["blocked"] as? JsonArray)?.let { blockedIntents.addAll(it) }
         if (timingLog == null) return
         for ((key, value) in response) {
             if (key == "state" || key == "ok" || value !is JsonPrimitive) continue
@@ -405,7 +415,9 @@ class AdbAppDriver(
             ).toString() + "\n",
         )
         step.clear()
-        return JsonObject(fresh + ("lastAction" to lastAction))
+        val blocked = JsonArray(blockedIntents.toList())
+        blockedIntents.clear()
+        return JsonObject(fresh + ("lastAction" to lastAction) + ("blockedIntents" to blocked))
     }
 
     private fun waitUntil(timeoutMs: Long, what: String, condition: () -> Boolean) {
@@ -430,6 +442,7 @@ class AdbAppDriver(
  *
  * ```
  * bombadil-android --package <package> [--apk <file>] [--agent <apk>] [--grant <permission>]...
+ *                  [--allow-external-activities]
  * ```
  *
  * The device is the first serial in `BOMBADIL_ANDROID_SERIALS`
@@ -443,6 +456,7 @@ fun main(args: Array<String>) {
     var apk: String? = null
     var agentApk: File? = null
     val permissions = mutableListOf<String>()
+    var allowExternal = false
     val rest = args.iterator()
     while (rest.hasNext()) {
         when (val arg = rest.next()) {
@@ -450,6 +464,7 @@ fun main(args: Array<String>) {
             "--apk" -> apk = rest.next()
             "--grant" -> permissions += rest.next()
             "--agent" -> agentApk = File(rest.next())
+            "--allow-external-activities" -> allowExternal = true
             else -> error("unknown argument `$arg`")
         }
     }
@@ -463,6 +478,7 @@ fun main(args: Array<String>) {
             permissions,
             timingLog = System.getenv("BOMBADIL_ANDROID_TIMINGS")?.let(::File),
             agentApk = agentApk,
+            allowExternalActivities = allowExternal,
         ),
     )
 }

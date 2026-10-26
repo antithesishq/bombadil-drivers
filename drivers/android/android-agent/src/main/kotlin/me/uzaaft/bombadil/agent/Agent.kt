@@ -2,6 +2,8 @@ package me.uzaaft.bombadil.agent
 
 import android.app.Activity
 import android.app.Instrumentation
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.graphics.Region
 import android.net.LocalServerSocket
@@ -34,6 +36,7 @@ import androidx.compose.ui.semantics.SemanticsPropertyKey
 import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.text.AnnotatedString
 import me.uzaaft.bombadil.helper.Tree
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.WeakHashMap
 import kotlin.math.roundToInt
@@ -70,11 +73,56 @@ class Agent : Instrumentation() {
     /** Nodes of the last tree, by id. Main thread only. */
     private var nodes: Map<String, Tree.Node> = HashMap()
 
+    /** Hand-offs to other apps blocked since the last response, as JSON. Guarded by itself. */
+    private val blocked = ArrayList<JSONObject>()
+
+    /**
+     * Blocks activity starts that would leave the app, the Espresso-Intents
+     * way, before the other app launches: an implicit intent that anything
+     * outside the app could handle (a link to the browser, a chooser) or an
+     * explicit one to another package. The app's own activities, and
+     * permission requests (system dialogs that belong to the app's flow),
+     * pass. A monitor made without a filter is asked through
+     * [onStartActivity] for every start; a result there stops the start,
+     * and null lets the next monitor ([starts]) see it.
+     */
+    private val handOffs = object : ActivityMonitor() {
+        override fun onStartActivity(intent: Intent): ActivityResult? {
+            val foreign = foreignPackage(intent) ?: return null
+            val record = JSONObject().put("action", intent.action ?: JSONObject.NULL)
+                .put("data", intent.dataString ?: JSONObject.NULL)
+                .put("package", foreign.ifEmpty { null } ?: JSONObject.NULL)
+            Log.i(TAG, "blocked $intent (to ${foreign.ifEmpty { "nothing" }})")
+            synchronized(blocked) { blocked.add(record) }
+            return ActivityResult(Activity.RESULT_CANCELED, null)
+        }
+    }
+
+    /**
+     * The package outside the app that [intent] would open: its explicit
+     * component's or package's, else the first foreign activity that
+     * resolves it, or "" if nothing resolves it (the start would fail).
+     * Null if it stays in the app.
+     */
+    private fun foreignPackage(intent: Intent): String? {
+        // PackageManager.ACTION_REQUEST_PERMISSIONS, which is hidden.
+        if (intent.action == "android.content.pm.action.REQUEST_PERMISSIONS") return null
+        val own = targetContext.packageName
+        val explicit = intent.component?.packageName ?: intent.`package`
+        if (explicit != null) return explicit.takeIf { it != own }
+        // Unwraps nothing: a chooser resolves to the system's, which is foreign.
+        val handlers = targetContext.packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            .map { it.activityInfo.packageName }
+        return handlers.firstOrNull { it != own } ?: if (handlers.isEmpty()) "" else null
+    }
+
     override fun onCreate(arguments: Bundle?) {
         super.onCreate(arguments)
         // Before the app creates any view: Compose calls this for each root
         // (activity content, dialogs, popups).
         ViewRootForTest.onViewCreatedCallback = { root -> composeRoots[root] = Unit }
+        // First, so that a blocked start never counts as leaving.
+        if (arguments?.getString("allowExternalActivities") != "true") addMonitor(handOffs)
         addMonitor(starts)
         start()
     }
@@ -158,14 +206,20 @@ class Agent : Instrumentation() {
         // from outside the process.
         val finishing = onMain(capMs) { activities.any { it.isFinishing } } ?: false
         if (starts.hits != hitsBefore || finishing) {
-            return response.put("leaving", true).put("from", top ?: JSONObject.NULL).toString()
+            return withBlocked(response).put("leaving", true).put("from", top ?: JSONObject.NULL).toString()
         }
         return state(capMs, response)
+    }
+
+    /** Adds `blocked`, the hand-offs blocked since the last response, and forgets them. */
+    private fun withBlocked(response: JSONObject): JSONObject = synchronized(blocked) {
+        response.put("blocked", JSONArray(blocked)).also { blocked.clear() }
     }
 
     /** Waits for the app to settle and adds the state, or `settled: false` and no state if it can't be read. */
     private fun state(capMs: Long, response: JSONObject): String {
         val settle = settle(capMs)
+        withBlocked(response)
         response.put("settled", settle.reason == null).put("busy", settle.reason ?: JSONObject.NULL)
             .put("waitMs", settle.waitMs).put("rounds", settle.rounds).put("buildMs", settle.buildMs)
             .put("focused", settle.focused).put("resumed", settle.resumed).put("top", settle.top ?: JSONObject.NULL)
