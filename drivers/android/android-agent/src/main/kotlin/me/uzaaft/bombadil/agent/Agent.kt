@@ -8,6 +8,7 @@ import android.graphics.Rect
 import android.graphics.Region
 import android.net.LocalServerSocket
 import android.net.LocalSocket
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +20,7 @@ import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Checkable
@@ -712,9 +714,34 @@ class Agent : Instrumentation() {
             // leaves out the windows behind it; so does the state.
             if (modal(view)) break
         }
+        keyboard(roots.firstOrNull()?.first)?.let { windows.add(0, it) }
         nodes = Tree.build(windows)
         val packageName = if (windows.any { it.focused }) targetContext.packageName else null
         return Tree.json(packageName, topActivityInstance()?.javaClass?.name, focus, windows)
+    }
+
+    /**
+     * The keyboard, if it's shown over the app's front window [front], as
+     * an `inputMethod` window without nodes (it belongs to another app).
+     * The helper reports it too, and specs need it: Back closes the
+     * keyboard before it goes back in the app.
+     */
+    private fun keyboard(front: View?): Tree.Window? {
+        // Before API 30 there's no way to tell from inside the app.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val insets = front?.rootWindowInsets ?: return null
+        if (!insets.isVisible(WindowInsets.Type.ime())) return null
+        val height = insets.getInsets(WindowInsets.Type.ime()).bottom
+        val location = IntArray(2)
+        front.getLocationOnScreen(location)
+        return Tree.Window().apply {
+            type = "inputMethod"
+            layer = Int.MAX_VALUE
+            left = location[0]
+            right = location[0] + front.width
+            bottom = location[1] + front.height
+            top = bottom - height
+        }
     }
 
     private fun viewNode(view: View, origin: IntArray, clip: Rect): Tree.Node {
