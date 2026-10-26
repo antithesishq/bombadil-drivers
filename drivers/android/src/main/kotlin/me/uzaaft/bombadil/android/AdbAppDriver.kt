@@ -88,6 +88,12 @@ class AdbAppDriver(
     private val frameTimeoutMs: Long = 500,
     /** Fallback: a window change that never goes quiet is reported after this long. */
     private val windowTimeoutMs: Long = 1_000,
+    /**
+     * Fallback: after the app starts or finishes an activity, the new top
+     * activity's window is awaited this long. Another app's cold start (the
+     * browser, for a link) took over a second on a busy emulator.
+     */
+    private val activityTimeoutMs: Long = 3_000,
     /** Fallback: an app that never stops presenting frames is reported mid-animation after this long. */
     private val drainMaxMs: Long = 2_000,
     /**
@@ -303,7 +309,10 @@ class AdbAppDriver(
         val acted = System.nanoTime()
         val response = when {
             initial -> helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
-            fromTop != null -> helper.request("await", "fromTop" to fromTop, "gapMs" to gapMs, "windowTimeoutMs" to windowTimeoutMs)
+            fromTop != null -> helper.request(
+                "await", "fromTop" to fromTop, "gapMs" to gapMs, "windowTimeoutMs" to activityTimeoutMs,
+                "sinceActionMs" to (acted - started) / 1_000_000,
+            )
             else -> helper.request(
                 "next", "gapMs" to gapMs, "foreignGapMs" to foreignGapMs, "appPackage" to packageName,
                 "frameTimeoutMs" to frameTimeoutMs, "windowTimeoutMs" to windowTimeoutMs, "drainMaxMs" to drainMaxMs,

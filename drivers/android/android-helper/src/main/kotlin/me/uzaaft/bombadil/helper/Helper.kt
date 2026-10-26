@@ -46,6 +46,10 @@ class Helper : Instrumentation() {
 
     @Volatile
     private var activity: String? = null
+
+    /** When the window state change naming [activity] arrived (System.nanoTime). */
+    @Volatile
+    private var activityNanos = 0L
     private val isActivity = HashMap<String, Boolean>()
 
     override fun onCreate(arguments: Bundle?) {
@@ -175,13 +179,15 @@ class Helper : Instrumentation() {
         ui.windows.any { it.isActive && it.root?.let { root -> pkg == null || root.packageName?.toString() == pkg } == true }
 
     /**
-     * Whether the window of [top] (package/class) has been shown and its
-     * package's window is active. The window state change that shows an
-     * activity names it; until then the old window of the same app may
-     * still be the active one.
+     * Whether the window of [top] (package/class) has been shown since
+     * [since] and its package's window is active. The window state change
+     * that shows an activity names it; until then the old window of the
+     * same app may still be the active one. A change from before [since]
+     * doesn't count: going back to an activity shown earlier would
+     * otherwise pass at once, while the departing window is still active.
      */
-    private fun shown(top: String): Boolean =
-        activity == top.substringAfter('/') && hasActiveWindow(top.substringBefore('/'))
+    private fun shown(top: String, since: Long): Boolean =
+        activity == top.substringAfter('/') && activityNanos >= since && hasActiveWindow(top.substringBefore('/'))
 
     /** Before an action: forgets the frames shown so far, so that the next ones stand out. */
     private fun arm() {
@@ -301,7 +307,7 @@ class Helper : Instrumentation() {
                 // in for their frames.
                 val quietSince = maxOf(lastEvent, lastFrame)
                 signal = when {
-                    now - quietSince >= gap && (if (newTop != null) shown(newTop) else hasActiveWindow()) ->
+                    now - quietSince >= gap && (if (newTop != null) shown(newTop, since) else hasActiveWindow()) ->
                         if (newTop != null) "activity" else "window"
                     now >= windowDeadline -> "windowCap"
                     else -> null
@@ -343,16 +349,20 @@ class Helper : Instrumentation() {
     /**
      * For the in-process agent, when the app has started an activity or is
      * finishing one: waits until the top activity is no longer [fromTop],
-     * its window has been shown (a window state change names it), a window
-     * of its package is active, and frames
-     * and accessibility events have paused for [gapMs], then returns the
+     * its window has been shown (a window state change since the action,
+     * [sinceActionMs] before the request, names it), a window of its
+     * package is active, and frames and accessibility events have paused
+     * for [gapMs], then returns the
      * tree. The same signals as [next]'s activity change, without frames
      * to watch (the agent acted, not the helper). Fallback:
      * [windowTimeoutMs], if the activity never changes (a start that
      * failed) or no window becomes active.
      */
-    private fun await(fromTop: String?, gapMs: Long, windowTimeoutMs: Long): String {
+    private fun await(fromTop: String?, gapMs: Long, windowTimeoutMs: Long, sinceActionMs: Long): String {
         val start = System.nanoTime()
+        // The agent may answer only after the new activity has been shown: an
+        // activity of its own process starts on the main thread it waits for.
+        val acted = start - sinceActionMs * 1_000_000
         val deadline = start + windowTimeoutMs * 1_000_000
         val gap = gapMs * 1_000_000
         var newTop: String? = null
@@ -360,14 +370,24 @@ class Helper : Instrumentation() {
         var signal: String?
         while (true) {
             polls++
-            if (newTop == null) {
-                val top = topActivity()
-                if (top != null && top != fromTop) newTop = top
-            }
+            // Once the top activity has changed, follow it: the first new one
+            // can itself be on its way out (Back pressed as it appeared).
+            val top = topActivity()
+            if (top != null && (newTop != null || top != fromTop)) newTop = top
             val lastEvent = idleLock.withLock { lastEventNanos }
             val now = System.nanoTime()
             signal = when {
-                newTop != null && now - lastEvent >= gap && shown(newTop) -> "activity"
+                // Another app's activity (a warm browser) may come to the front
+                // without a window state change naming it; the app's departing
+                // window can't pass for one of another package's, though.
+                newTop != null && now - lastEvent >= gap && (
+                    shown(newTop, acted) || newTop.substringBefore('/') != fromTop?.substringBefore('/') &&
+                        hasActiveWindow(newTop.substringBefore('/'))
+                    ) -> "activity"
+                // The agent can read the top a moment late, when the activity
+                // above it is already finishing: [fromTop] is then where the
+                // app lands, and a window state change naming it says so.
+                newTop == null && top != null && top == fromTop && now - lastEvent >= gap && shown(top, acted) -> "activity"
                 now >= deadline -> "windowCap"
                 else -> null
             }
@@ -399,7 +419,10 @@ class Helper : Instrumentation() {
             }
             synchronized(isActivity) { isActivity[key] = known }
         }
-        if (known) activity = cls
+        if (known) {
+            activityNanos = System.nanoTime()
+            activity = cls
+        }
     }
 
     private fun serve(socket: LocalSocket) {
@@ -473,6 +496,7 @@ class Helper : Instrumentation() {
             }
             "await" -> return await(
                 request.optString("fromTop").ifEmpty { null }, request.getLong("gapMs"), request.getLong("windowTimeoutMs"),
+                request.optLong("sinceActionMs"),
             )
             "next" -> return next(
                 request.getLong("frameTimeoutMs"), request.getLong("windowTimeoutMs"),

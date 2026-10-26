@@ -183,25 +183,17 @@ class Agent : Instrumentation() {
         "scroll" -> {
             val result = onMain(request) { node -> scroll(node, request.getString("direction")) }
             if (result is Swipe) {
-                swipe(result.x1, result.y1, result.x2, result.y2, 300)
-                "input"
+                injected { swipe(result.x1, result.y1, result.x2, result.y2, 300) }
             } else {
                 result as String?
             }
         }
-        "tap" -> {
-            tap(request.getInt("x"), request.getInt("y"), long = false)
-            "input"
-        }
-        "swipe" -> {
+        "tap" -> injected { tap(request.getInt("x"), request.getInt("y"), long = false) }
+        "swipe" -> injected {
             swipe(request.getInt("x1"), request.getInt("y1"), request.getInt("x2"), request.getInt("y2"),
                 request.optLong("durationMs", 300))
-            "input"
         }
-        "key" -> {
-            sendKeyDownUpSync(request.getInt("code"))
-            "input"
-        }
+        "key" -> injected { sendKeyDownUpSync(request.getInt("code")) }
         else -> throw IllegalArgumentException("unknown command $command")
     }
 
@@ -217,8 +209,21 @@ class Agent : Instrumentation() {
 
     private fun Any?.orTap(request: JSONObject, long: Boolean): String? {
         if (this !is Tap) return this as String?
-        tap(x, y, long)
-        return "input"
+        return injected { tap(x, y, long) }
+    }
+
+    /**
+     * Runs an input injection. The system refuses one aimed at a window the
+     * app doesn't own (a node under the navigation bar, or a window that
+     * has just gone): the action is then not done, and the agent carries on.
+     */
+    private fun injected(block: () -> Unit): String = try {
+        block()
+        "input"
+    } catch (e: IllegalArgumentException) {
+        "!input refused: ${e.message}"
+    } catch (e: SecurityException) {
+        "!input refused: ${e.message}"
     }
 
     private fun click(node: Tree.Node, long: Boolean): Any? {
