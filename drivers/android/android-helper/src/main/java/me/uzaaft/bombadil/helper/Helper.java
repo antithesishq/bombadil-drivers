@@ -181,9 +181,9 @@ public class Helper extends Instrumentation {
      * Before the action, [arm] clears the frame stats of the app's windows
      * and the keyboard. Afterwards the signal is one of:
      * - Frames: a watched window has presented a frame after the action, and
-     *   no further frame has followed within [gapMs] (a few refresh
-     *   periods), like the terminal driver reading output until the program
-     *   stops writing. Frames cover content changes that send no
+     *   neither a further frame nor an accessibility event has followed
+     *   within [gapMs] (a few refresh periods), like the terminal driver
+     *   reading output until the program stops writing. Frames cover content changes that send no
      *   accessibility events (most of Compose's).
      * - A window change (TYPE_WINDOWS_CHANGED or TYPE_WINDOW_STATE_CHANGED:
      *   an activity, dialog or keyboard coming or going): the response is
@@ -259,8 +259,12 @@ public class Helper extends Instrumentation {
                 }
                 until = Math.min(quietSince + gap, windowDeadline);
             } else if (frames > 0) {
-                signal = now - lastFrame >= gap ? "frame" : now >= drainDeadline ? "drainCap" : null;
-                until = Math.min(lastFrame + gap, drainDeadline);
+                // Accessibility events count as output too: a window that
+                // is going away presents a last frame well before the
+                // window change is announced (Back out of another app).
+                long quietSince = Math.max(lastFrame, lastEvent > since ? lastEvent : 0);
+                signal = now - quietSince >= gap ? "frame" : now >= drainDeadline ? "drainCap" : null;
+                until = Math.min(quietSince + gap, drainDeadline);
             } else {
                 signal = now >= deadline ? "timeout" : null;
                 until = deadline;
