@@ -26,29 +26,44 @@ application {
 }
 
 // The on-device helper the adb driver talks to (`android-helper/`). It's
-// plain Java against android.jar, packaged by `android-helper/build.sh`
-// with the SDK's build tools, so it needs no Android Gradle plugin; the
-// driver carries the APK as a resource and installs it on each device.
+// Kotlin compiled against android.jar (in its own source set), shrunk
+// together with the Kotlin standard library and packaged by
+// `android-helper/build.sh` with the SDK's build tools, so it needs no
+// Android Gradle plugin; the driver carries the APK as a resource and
+// installs it on each device.
 val androidHome = providers.environmentVariable("ANDROID_HOME")
 
-val compileHelper by tasks.registering(JavaCompile::class) {
-    source("android-helper/src/main/java", "android-helper/src/common/java")
-    classpath = files(androidHome.map { "$it/platforms/android-35/android.jar" })
-    destinationDirectory = layout.buildDirectory.dir("helper/classes")
-    options.release = 11
+val helper: SourceSet = sourceSets.create("helper") {
+    kotlin.srcDirs("android-helper/src/main/kotlin", "android-helper/src/common/kotlin")
+}
+
+dependencies {
+    "helperCompileOnly"(files(androidHome.map { "$it/platforms/android-35/android.jar" }))
+}
+
+tasks.named<JavaCompile>("compileHelperJava") { options.release = 11 }
+
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileHelperKotlin") {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+        // android.jar provides the Java library, as on the device.
+        noJdk = true
+    }
 }
 
 val helperApk by tasks.registering(Exec::class) {
-    val classes = compileHelper.flatMap { it.destinationDirectory }
+    val classes = helper.output.classesDirs
+    val libraries = configurations["helperRuntimeClasspath"]
     val work = layout.buildDirectory.dir("helper/work")
     val apk = layout.buildDirectory.file("helper/apk/me/uzaaft/bombadil/android/bombadil-helper.apk")
-    inputs.dir(classes)
-    inputs.files("android-helper/AndroidManifest.xml", "android-helper/build.sh")
+    inputs.files(classes, libraries)
+    inputs.files("android-helper/AndroidManifest.xml", "android-helper/build.sh", "android-helper/rules.pro")
     outputs.dir(layout.buildDirectory.dir("helper/apk"))
-    commandLine(
-        "bash", "android-helper/build.sh",
-        classes.get().asFile.path, work.get().asFile.path, apk.get().asFile.path,
-    )
+    argumentProviders.add {
+        listOf("android-helper/build.sh", work.get().asFile.path, apk.get().asFile.path) +
+            (classes.files + libraries.files).map { it.path }
+    }
+    executable = "bash"
 }
 
 sourceSets {
@@ -58,7 +73,7 @@ sourceSets {
     }
     test {
         // The helper's Android-free tree code, tested on the JVM.
-        java.srcDir("android-helper/src/common/java")
+        kotlin.srcDir("android-helper/src/common/kotlin")
     }
 }
 
