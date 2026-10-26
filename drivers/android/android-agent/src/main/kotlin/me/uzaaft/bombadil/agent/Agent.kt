@@ -406,6 +406,9 @@ class Agent : Instrumentation() {
             var rounds = 0
             var waiting = false
 
+            // Frames since settling began, for [drawing].
+            var frames = 0
+
             // How long each reason kept the app busy.
             val busyMs = LinkedHashMap<String, Long>()
             var lastReason: String? = null
@@ -430,7 +433,7 @@ class Agent : Instrumentation() {
                 // or two later. If it doesn't within FOCUS_WAIT_MS (a fallback),
                 // something outside the app is in front, and the driver asks the
                 // helper.
-                val reason = busy() ?: if (resumed.isNotEmpty() && !frontFocused() &&
+                val reason = busy() ?: drawing(frames, lastCheck) ?: if (resumed.isNotEmpty() && !frontFocused() &&
                     SystemClock.uptimeMillis() < start + FOCUS_WAIT_MS
                 ) {
                     "focus"
@@ -459,6 +462,7 @@ class Agent : Instrumentation() {
             }
 
             override fun doFrame(frameTimeNanos: Long) {
+                frames++
                 if (!waiting) return
                 // After this frame's other callbacks (Compose's recomposition)
                 // and traversal: post rather than check now.
@@ -500,6 +504,31 @@ class Agent : Instrumentation() {
             }
         }
         return result!!
+    }
+
+    /** Front windows of plain Views, watched for drawing. Main thread only. */
+    private val drawWatched = WeakHashMap<View, Unit>()
+
+    /** When a watched window last drew (uptime ms). Main thread only. */
+    private var lastViewDraw = 0L
+
+    /**
+     * For an activity of plain Views (no Compose root in its window): "draw"
+     * until a frame has passed without drawing. Views animate (a ListView's
+     * fling, a ripple) in Choreographer callbacks that leave no trace in the
+     * main queue between frames, so this watches what reaches the screen,
+     * like the browser driver's next frame. Compose windows don't need it:
+     * their animations keep the Recomposer busy, which [busy] sees, and
+     * skipping it there saves a frame per step. [frames] counts the frames
+     * since settling began, and [since] is the previous check.
+     */
+    private fun drawing(frames: Int, since: Long): String? {
+        val decor = topActivityInstance()?.window?.peekDecorView() ?: return null
+        if (!visible(decor) || composeRoots.keys.any { it.view.rootView === decor }) return null
+        if (drawWatched.put(decor, Unit) == null) {
+            decor.viewTreeObserver.addOnDrawListener { lastViewDraw = SystemClock.uptimeMillis() }
+        }
+        return if (frames == 0 || lastViewDraw >= since) "draw" else null
     }
 
     /** What the app is still busy with, or null if it's idle. Main thread only. */
