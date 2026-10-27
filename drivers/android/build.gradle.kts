@@ -90,6 +90,7 @@ dependencies {
     "agentCompileOnly"(fileTree(layout.buildDirectory.dir("agent/aars")) { builtBy("agentAarClasses") })
     "agentCompileOnly"("org.jetbrains.kotlinx:kotlinx-coroutines-core-jvm:1.10.1")
     "agentCompileOnly"("androidx.collection:collection-jvm:1.5.0")
+    "agentCompileOnly"("androidx.lifecycle:lifecycle-common-jvm:2.10.0")
 }
 
 /** The classes.jar of each AAR, as <name>.jar. */

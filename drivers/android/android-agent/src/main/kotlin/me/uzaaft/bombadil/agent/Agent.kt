@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.graphics.Region
+import android.hardware.display.DisplayManager
 import android.net.LocalServerSocket
 import android.net.LocalSocket
 import android.os.Build
@@ -16,6 +17,7 @@ import android.os.MessageQueue
 import android.os.SystemClock
 import android.util.Log
 import android.view.Choreographer
+import android.view.Display
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
@@ -61,6 +63,9 @@ import java.util.concurrent.TimeUnit
  */
 class Agent : Instrumentation() {
     private val main by lazy { Handler(Looper.getMainLooper()) }
+
+    /** Posts asynchronous messages, which a pending traversal's barrier doesn't hold back. */
+    private val async by lazy { Handler.createAsync(Looper.getMainLooper()) }
 
     /** Compose roots ever created, attached or not. Main thread only. */
     private val composeRoots = WeakHashMap<ViewRootForTest, Unit>()
@@ -126,8 +131,19 @@ class Agent : Instrumentation() {
         // First, so that a blocked start never counts as leaving.
         if (arguments?.getString("allowExternalActivities") != "true") addMonitor(handOffs)
         addMonitor(starts)
+        virtualClock = arguments?.getString("virtualFrameClock") == "true"
+        if (virtualClock) {
+            // Also before the app creates any view, so that every window
+            // Recomposer runs on it.
+            VirtualFrameClock.install()
+            val display = targetContext.getSystemService(DisplayManager::class.java).getDisplay(Display.DEFAULT_DISPLAY)
+            if (display != null && display.refreshRate > 0) VirtualFrameClock.frameNanos = (1e9 / display.refreshRate).toLong()
+        }
         start()
     }
+
+    /** Whether Compose frames run on [VirtualFrameClock] while the agent settles, rather than at vsync. */
+    private var virtualClock = false
 
     override fun callActivityOnCreate(activity: Activity, icicle: Bundle?) {
         activities.add(activity)
@@ -194,7 +210,11 @@ class Agent : Instrumentation() {
         if (command == "state") return state(capMs, JSONObject().put("ok", true))
         val started = SystemClock.uptimeMillis()
         val hitsBefore = starts.hits
-        val top = onMain(capMs) { topActivity() }
+        val top = onMain(capMs) {
+            // The frames the action asks for are virtual from the start.
+            if (virtualClock) VirtualFrameClock.virtual = true
+            topActivity()
+        }
         val response = JSONObject().put("ok", true)
         val via = act(command, request)
         response.put("actionMs", SystemClock.uptimeMillis() - started)
@@ -208,6 +228,8 @@ class Agent : Instrumentation() {
         // from outside the process.
         val finishing = onMain(capMs) { activities.any { it.isFinishing } } ?: false
         if (starts.hits != hitsBefore || finishing) {
+            // The agent won't settle this step: back to vsync.
+            if (virtualClock) onMain(capMs) { VirtualFrameClock.virtual = false }
             return withBlocked(response).put("leaving", true).put("from", top ?: JSONObject.NULL).toString()
         }
         return state(capMs, response)
@@ -226,6 +248,7 @@ class Agent : Instrumentation() {
             .put("waitMs", settle.waitMs).put("rounds", settle.rounds).put("buildMs", settle.buildMs)
             .put("focused", settle.focused).put("resumed", settle.resumed).put("top", settle.top ?: JSONObject.NULL)
         for ((reason, ms) in settle.busyMs) response.put("busyMs.$reason", ms)
+        if (virtualClock) response.put("virtualFrames", settle.virtualFrames).put("realFrames", settle.realFrames)
         val tree = settle.tree ?: return response.put("settled", false).toString()
         // Spliced in rather than parsed, to save the time.
         val head = response.toString()
@@ -433,6 +456,9 @@ class Agent : Instrumentation() {
         val top: String? = null,
         /** How long each reason kept the app busy. */
         val busyMs: Map<String, Long> = emptyMap(),
+        /** Frames run on the virtual clock, and vsync frames waited for. */
+        val virtualFrames: Int = 0,
+        val realFrames: Int = 0,
     )
 
     /**
@@ -483,46 +509,73 @@ class Agent : Instrumentation() {
                 }
             }
 
+            // With the virtual clock: virtual frames run so far, and [frames]
+            // when the last one ran.
+            var virtualFrames = 0
+            var framesAtVirtual = 0
+
             fun check() {
+                if (virtualClock) VirtualFrameClock.virtual = true
+                val now = SystemClock.uptimeMillis()
                 // Resumed, but the app's front window doesn't have input focus
                 // yet: a dialog just opened, or closed, and focus moves a frame
                 // or two later. If it doesn't within FOCUS_WAIT_MS (a fallback),
                 // something outside the app is in front, and the driver asks the
                 // helper.
-                val reason = busy() ?: drawing(frames, lastCheck) ?: if (resumed.isNotEmpty() && !frontFocused() &&
-                    SystemClock.uptimeMillis() < start + FOCUS_WAIT_MS
-                ) {
-                    "focus"
-                } else {
-                    null
-                }
-                val now = SystemClock.uptimeMillis()
+                val reason = (if (virtualClock) virtualBusy(virtualFrames, frames > framesAtVirtual) else busy())
+                    ?: drawing(frames, lastCheck)
+                    ?: if (resumed.isNotEmpty() && !frontFocused() && now < start + FOCUS_WAIT_MS) {
+                        "focus"
+                    } else if (virtualClock && now < start + KEYBOARD_WAIT_MS && keyboardBusy()) {
+                        "keyboard"
+                    } else {
+                        null
+                    }
                 lastReason?.let { busyMs[it] = (busyMs[it] ?: 0) + now - lastCheck }
                 lastReason = reason
                 lastCheck = now
                 if (reason == null || SystemClock.uptimeMillis() >= deadline) {
+                    if (virtualClock) VirtualFrameClock.virtual = false
                     val built = SystemClock.uptimeMillis()
                     val tree = tree()
                     result = Settled(
                         tree, reason, built - start, rounds, SystemClock.uptimeMillis() - built,
-                        frontFocused(), resumed.isNotEmpty(), topActivity(), busyMs,
+                        frontFocused(), resumed.isNotEmpty(), topActivity(), busyMs, virtualFrames, frames,
                     )
                     done.countDown()
                     return
                 }
                 waiting = true
-                // Messages due: check again once the queue has run them. Anything
-                // else waits for a frame: recomposition, layout and animations
-                // happen in frames, and focus comes back with one.
-                if (reason == "queue") Looper.myQueue().addIdleHandler(this) else Choreographer.getInstance().postFrameCallback(this)
+                when (reason) {
+                    // Nothing but frame requests left: run the frame now, and
+                    // check again once the coroutines it resumed have run.
+                    "frame" -> {
+                        VirtualFrameClock.frame { measureAndLayout() }
+                        virtualFrames++
+                        framesAtVirtual = frames
+                        async.post(this)
+                    }
+                    // Asynchronous messages due (coroutines resumed on the main
+                    // thread): check again after them, without waiting for a
+                    // pending traversal's barrier to go.
+                    "async" -> async.post(this)
+                    // Messages due: check again once the queue has run them.
+                    "queue" -> Looper.myQueue().addIdleHandler(this)
+                    // Anything else waits for a frame: recomposition, layout
+                    // and animations happen in frames (with the virtual clock:
+                    // drawing, Views' layout, insets and new windows), and
+                    // focus comes back with one.
+                    else -> Choreographer.getInstance().postFrameCallback(this)
+                }
             }
 
             override fun doFrame(frameTimeNanos: Long) {
                 frames++
                 if (!waiting) return
                 // After this frame's other callbacks (Compose's recomposition)
-                // and traversal: post rather than check now.
-                main.post(this)
+                // and traversal: post rather than check now. With the virtual
+                // clock, ahead of any traversal the frame scheduled.
+                if (virtualClock) async.post(this) else main.post(this)
                 waiting = false
             }
 
@@ -544,6 +597,7 @@ class Agent : Instrumentation() {
             // Recomposer whose frames are paused), or blocked: take the tree
             // as it is if the main thread is free at all.
             main.post {
+                if (virtualClock) VirtualFrameClock.virtual = false
                 try {
                     if (result == null) {
                     val built = SystemClock.uptimeMillis()
@@ -585,6 +639,71 @@ class Agent : Instrumentation() {
             decor.viewTreeObserver.addOnDrawListener { lastViewDraw = SystemClock.uptimeMillis() }
         }
         return if (frames == 0 || lastViewDraw >= since) "draw" else null
+    }
+
+    /**
+     * [busy] for the virtual frame clock, after compose-ui-test's idling
+     * (`ComposeIdlingResource` with `MainTestClock.autoAdvance`). Messages
+     * that are due run first; then background work; then, if the only
+     * thing left is a Recomposer waiting for a frame (recomposition or
+     * animations), "frame": the agent runs the frame on the virtual clock
+     * at once. Once Compose is idle, the View system catches up in a real
+     * frame, as compose-ui-test's `waitForIdle` ends with the next
+     * Choreographer frame: if a traversal is pending, or virtual frames
+     * ran and no real frame has since ([drawnSince]), "draw". That frame
+     * draws, lays out Views, dispatches insets, attaches new windows and
+     * moves focus, which may give Compose more to do. [virtualFrames]
+     * caps the virtual frames per step (an endless animation), after which
+     * the Recomposer waits for vsync like any other work, until the cap.
+     * Main thread only.
+     */
+    private fun virtualBusy(virtualFrames: Int, drawnSince: Boolean): String? {
+        if (Snapshot.isApplyObserverNotificationPending) Snapshot.sendApplyNotifications()
+        // What a traversal does for Compose roots.
+        measureAndLayout()
+        val due = MainQueue.due()
+        if (due == null) {
+            if (!Looper.myQueue().isIdle) return "queue"
+        } else {
+            if (due.async) return "async"
+            if (due.sync) return "queue"
+        }
+        if (coroutinesBusy() || backgroundBusy()) return "background"
+        if (VirtualFrameClock.hasAwaiters) return if (virtualFrames < MAX_VIRTUAL_FRAMES) "frame" else "recomposer"
+        // Waiting for a vsync frame it asked for before the action.
+        if (Recomposer.runningRecomposers.value.any { it.hasPendingWork }) return "recomposer"
+        if (due?.barrier == true || virtualFrames > 0 && !drawnSince) return "draw"
+        return null
+    }
+
+    /** Measures and lays out the Compose roots that need it. Main thread only. */
+    private fun measureAndLayout() {
+        for (root in composeRoots.keys) {
+            if (visible(root.view) && root.hasPendingMeasureOrLayout) root.measureAndLayoutForTest()
+        }
+    }
+
+    /**
+     * Whether the keyboard is on its way in or out of the app's front
+     * window: it has taken over Back for the window (the IME registers its
+     * back callback with the window as soon as the app asks for it), but
+     * the window's insets don't show it yet, or the other way round. Back
+     * then goes to the keyboard, though the state would show none (or
+     * the other way round), so it isn't settled until the two agree. False
+     * where it can't tell (before API 33, legacy back, or hidden APIs out
+     * of reach). Main thread only.
+     */
+    private fun keyboardBusy(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        val front = topFocusable() ?: return false
+        val dispatcher = front.findOnBackInvokedDispatcher() ?: return false
+        val owner = runCatching {
+            if (BACK_CALLBACKS_ENABLED?.invoke(dispatcher) != true) return false
+            TOP_BACK_CALLBACK?.invoke(dispatcher) ?: return false
+        }.getOrElse { return false }
+        val ownsBack = owner.javaClass.name.contains("Ime")
+        val shown = front.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+        return ownsBack != shown
     }
 
     /** What the app is still busy with, or null if it's idle. Main thread only. */
@@ -935,6 +1054,23 @@ class Agent : Instrumentation() {
         const val TAG = "BombadilAgent"
         const val SOCKET = "bombadil-agent"
         const val FOCUS_WAIT_MS = 300L
+
+        /**
+         * Fallback, virtual clock only: how long a keyboard on its way in or
+         * out ([keyboardBusy]) is waited for; one that never arrives (no
+         * keyboard installed, say) is reported as it is after this long.
+         */
+        const val KEYBOARD_WAIT_MS = 500L
+
+        /** Virtual frames per step at most: two seconds of animation. */
+        const val MAX_VIRTUAL_FRAMES = 120
+
+        // The window's back dispatcher, a hidden class; see [keyboardBusy].
+        val BACK_DISPATCHER: Class<*>? = runCatching { Class.forName("android.window.WindowOnBackInvokedDispatcher") }.getOrNull()
+        val TOP_BACK_CALLBACK: java.lang.reflect.Method? = runCatching { BACK_DISPATCHER!!.getMethod("getTopCallback") }
+            .onFailure { Log.w(TAG, "can't see who owns Back; not waiting for the keyboard", it) }.getOrNull()
+        val BACK_CALLBACKS_ENABLED: java.lang.reflect.Method? =
+            runCatching { BACK_DISPATCHER!!.getMethod("isOnBackInvokedCallbackEnabled") }.getOrNull()
         val BACKGROUND_POOLS = listOf("DefaultDispatcher-worker-", "arch_disk_io_")
         // Compose internals its accessibility layer uses; public in the bytecode.
         val IS_TRANSPARENT: java.lang.reflect.Method? =

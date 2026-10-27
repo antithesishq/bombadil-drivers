@@ -5,6 +5,10 @@
 # app is optimised and obfuscated as in a release build. Update this list
 # when the agent starts using another class.
 
+-keep class androidx.compose.runtime.BroadcastFrameClock { *; }
+-keep class androidx.compose.runtime.MonotonicFrameClock { *; }
+-keep class androidx.compose.runtime.MonotonicFrameClock$DefaultImpls { *; }
+-keep class androidx.compose.runtime.MonotonicFrameClock$Key { *; }
 -keep class androidx.compose.runtime.Recomposer { *; }
 -keep class androidx.compose.runtime.Recomposer$* { *; }
 -keep class androidx.compose.runtime.RecomposerInfo { *; }
@@ -15,6 +19,11 @@
 -keep class androidx.compose.ui.node.RootForTest { *; }
 -keep class androidx.compose.ui.platform.ViewRootForTest { *; }
 -keep class androidx.compose.ui.platform.ViewRootForTest$Companion { *; }
+-keep class androidx.compose.ui.platform.AndroidUiDispatcher { *; }
+-keep class androidx.compose.ui.platform.AndroidUiDispatcher$Companion { *; }
+-keep class androidx.compose.ui.platform.WindowRecomposer_androidKt { *; }
+-keep class androidx.compose.ui.platform.WindowRecomposerFactory { *; }
+-keep class androidx.compose.ui.platform.WindowRecomposerPolicy { *; }
 -keep class androidx.compose.ui.semantics.AccessibilityAction { *; }
 -keep class androidx.compose.ui.semantics.Role { *; }
 -keep class androidx.compose.ui.semantics.Role$Companion { *; }
@@ -28,8 +37,13 @@
 -keep class androidx.compose.ui.semantics.SemanticsPropertyKey { *; }
 -keep class androidx.compose.ui.state.ToggleableState { *; }
 -keep class androidx.compose.ui.text.AnnotatedString { *; }
+-keep class androidx.lifecycle.Lifecycle { *; }
 
 -keep class kotlin.Function { *; }
+-keep class kotlin.coroutines.Continuation { *; }
+-keep class kotlin.coroutines.CoroutineContext { *; }
+-keep class kotlin.coroutines.CoroutineContext$Element { *; }
+-keep class kotlin.coroutines.CoroutineContext$Key { *; }
 -keep class kotlin.Lazy { *; }
 -keep class kotlin.LazyKt { *; }
 -keep class kotlin.Pair { *; }
