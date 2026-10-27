@@ -112,6 +112,12 @@ class AdbAppDriver(
      * each state lists the blocked ones in `blockedIntents`.
      */
     allowExternalActivities: Boolean = false,
+    /**
+     * Run Compose frames on the agent's virtual clock while it settles,
+     * instead of at vsync (see the agent's VirtualFrameClock): faster, but
+     * the app animates in virtual time. Needs [agentApk].
+     */
+    virtualFrameClock: Boolean = false,
     /** A file to append each step's timings to, as JSON lines. */
     private val timingLog: File? = null,
     override val stallTimeoutMs: Long? = 120_000,
@@ -119,7 +125,7 @@ class AdbAppDriver(
     override val name = "android-adb ($packageName on ${adb.serial})"
 
     private val helper = AndroidHelper(adb)
-    private val agent = agentApk?.let { AppAgent(adb, it, packageName, allowExternalActivities) }
+    private val agent = agentApk?.let { AppAgent(adb, it, packageName, allowExternalActivities, virtualFrameClock) }
 
     /** Whether the last state came from the agent, so that its node ids are the agent's. */
     private var inAgent = false
@@ -442,7 +448,7 @@ class AdbAppDriver(
  *
  * ```
  * bombadil-android --package <package> [--apk <file>] [--agent <apk>] [--grant <permission>]...
- *                  [--allow-external-activities]
+ *                  [--allow-external-activities] [--virtual-frame-clock]
  * ```
  *
  * The device is the first serial in `BOMBADIL_ANDROID_SERIALS`
@@ -457,6 +463,7 @@ fun main(args: Array<String>) {
     var agentApk: File? = null
     val permissions = mutableListOf<String>()
     var allowExternal = false
+    var virtualClock = false
     val rest = args.iterator()
     while (rest.hasNext()) {
         when (val arg = rest.next()) {
@@ -465,6 +472,7 @@ fun main(args: Array<String>) {
             "--grant" -> permissions += rest.next()
             "--agent" -> agentApk = File(rest.next())
             "--allow-external-activities" -> allowExternal = true
+            "--virtual-frame-clock" -> virtualClock = true
             else -> error("unknown argument `$arg`")
         }
     }
@@ -479,6 +487,7 @@ fun main(args: Array<String>) {
             timingLog = System.getenv("BOMBADIL_ANDROID_TIMINGS")?.let(::File),
             agentApk = agentApk,
             allowExternalActivities = allowExternal,
+            virtualFrameClock = virtualClock,
         ),
     )
 }

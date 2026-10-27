@@ -19,6 +19,9 @@ if [[ -n ${NIA_NO_AGENT:-} ]]; then agent=(); fi
 # NIA_ALLOW_EXTERNAL=1: let the app open other apps (the browser for an
 # article) instead of the agent blocking them.
 if [[ -n ${NIA_ALLOW_EXTERNAL:-} ]]; then agent+=(--allow-external-activities); fi
+# NIA_VIRTUAL_CLOCK=1: run Compose frames on the agent's virtual clock while it
+# settles, instead of at vsync (faster; see the README for what it costs).
+if [[ -n ${NIA_VIRTUAL_CLOCK:-} ]]; then agent+=(--virtual-frame-clock); fi
 
 exec "$repo/build/install/bombadil-compose/bin/bombadil-android" \
   --package "$NIA_PACKAGE" \

@@ -43,6 +43,8 @@ class AppAgent(
     appPackage: String,
     /** Let the app start other apps' activities instead of blocking them (see the agent). */
     private val allowExternalActivities: Boolean = false,
+    /** Run Compose frames on the agent's virtual clock while it settles (see the agent). */
+    private val virtualFrameClock: Boolean = false,
 ) : DeviceSocket(adb, SOCKET) {
     private val agentPackage = "$appPackage.bombadil"
 
@@ -57,7 +59,9 @@ class AppAgent(
     /** Starts the app's process with the agent in it, and connects. The app must not be running. */
     fun start() {
         close()
-        adb.run("shell", "nohup am instrument -w -e allowExternalActivities $allowExternalActivities $agentPackage/$CLASS >/dev/null 2>&1 &")
+        // The virtual clock reads who owns Back (a hidden API) to see the keyboard coming or going.
+        val hidden = if (virtualFrameClock) "--no-hidden-api-checks " else ""
+        adb.run("shell", "nohup am instrument -w $hidden-e allowExternalActivities $allowExternalActivities -e virtualFrameClock $virtualFrameClock $agentPackage/$CLASS >/dev/null 2>&1 &")
         await(30_000, "the agent") { request("ping")["ok"] != null }
     }
 
