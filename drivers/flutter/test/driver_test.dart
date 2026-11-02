@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 class FakeDriver implements BombadilDriver {
   final applied = <Object?>[];
   var stopped = false;
+  var capture = false;
 
   @override
   String get name => 'fake';
@@ -21,6 +22,10 @@ class FakeDriver implements BombadilDriver {
     applied.add(action);
     return {'applied': applied.length};
   }
+
+  @override
+  Future<List<int>?> screenshotPng() async =>
+      capture ? [137, 80, applied.length, 255] : null;
 
   @override
   Future<void> stop() async => stopped = true;
@@ -54,6 +59,29 @@ Future<(List<Object?>, Object?)> session(
 }
 
 void main() {
+  test(
+    'attaches screenshots to their states outside the application JSON',
+    () async {
+      final driver = FakeDriver()..capture = true;
+      final (sent, error) = await session(driver, [
+        '{"type":"apply","action":"Back"}',
+        '{"type":"terminate"}',
+      ]);
+      expect(error, isNull);
+      expect((sent[1] as Map)['screenshot_png'], 'iVAA/w==');
+      expect((sent[2] as Map)['screenshot_png'], 'iVAB/w==');
+      expect((sent[2] as Map)['state'], {'applied': 1});
+      for (final state in [
+        const EncodedJson('{"applied":1}'),
+        {'applied': 1},
+      ]) {
+        final message = State(state, screenshotPng: [137, 80, 1, 255]);
+        expect(jsonDecode(message.encode()), sent[2]);
+        expect(message.toJson(), sent[2]);
+      }
+    },
+  );
+
   test('reports a state for the start and for every applied action', () async {
     final driver = FakeDriver();
     final (sent, error) = await session(driver, [

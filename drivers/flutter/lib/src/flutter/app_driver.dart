@@ -98,6 +98,33 @@ class FlutterAppDriver implements BombadilDriver, ActionTarget {
   Future<void> back() => binding.back();
 
   @override
+  Future<List<int>?> screenshotPng() async {
+    final view = binding.renderViews.firstWhere(
+      (view) => view.flutterView.viewId == _view.viewId,
+    );
+    // ignore: invalid_use_of_protected_member
+    final scene = view.layer!.buildScene(ui.SceneBuilder());
+    try {
+      final image = await scene.toImage(
+        _view.physicalSize.width.ceil(),
+        _view.physicalSize.height.ceil(),
+      );
+      try {
+        final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+        if (bytes == null) throw StateError('PNG screenshot encoding failed');
+        return bytes.buffer.asUint8List(
+          bytes.offsetInBytes,
+          bytes.lengthInBytes,
+        );
+      } finally {
+        image.dispose();
+      }
+    } finally {
+      scene.dispose();
+    }
+  }
+
+  @override
   Future<Object?> start() async {
     binding.clock.startStep();
     final elapsed = Stopwatch()..start();

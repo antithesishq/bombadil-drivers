@@ -19,6 +19,8 @@ abstract interface class BombadilDriver {
   /// Performs [action] and returns the state the app settles into.
   Future<Object?> apply(Object? action);
 
+  Future<List<int>?> screenshotPng();
+
   /// Shuts the app down.
   Future<void> stop();
 }
@@ -44,11 +46,13 @@ Future<void> runDriver(
 
   send(Hello(driver.name, stallTimeout: stallTimeout));
   try {
-    send(State(await driver.start()));
+    final initial = await driver.start();
+    send(State(initial, screenshotPng: await driver.screenshotPng()));
     await for (final line in lines) {
       switch (BombadilMessage.fromJson(jsonDecode(line))) {
         case Apply(:final action):
-          send(State(await driver.apply(action)));
+          final state = await driver.apply(action);
+          send(State(state, screenshotPng: await driver.screenshotPng()));
         case Terminate():
           return;
       }

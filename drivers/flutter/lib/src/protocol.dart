@@ -33,10 +33,11 @@ class Hello extends DriverMessage {
 }
 
 class State extends DriverMessage {
-  const State(this.state);
+  const State(this.state, {this.screenshotPng});
 
   /// Any JSON-encodable value describing the app, or [EncodedJson].
   final Object? state;
+  final List<int>? screenshotPng;
 
   @override
   Map<String, Object?> toJson() => {
@@ -45,11 +46,13 @@ class State extends DriverMessage {
       EncodedJson(:final json) => jsonDecode(json),
       final state => state,
     },
+    if (screenshotPng case final bytes?) 'screenshot_png': base64Encode(bytes),
   };
 
   @override
   String encode() => switch (state) {
-    EncodedJson(:final json) => '{"type":"state","state":$json}',
+    EncodedJson(:final json) =>
+      '{"type":"state","state":$json${screenshotPng == null ? '' : ',"screenshot_png":"${base64Encode(screenshotPng!)}"'}}',
     _ => super.encode(),
   };
 }
