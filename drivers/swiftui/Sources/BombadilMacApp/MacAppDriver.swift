@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import BombadilDriver
 import Foundation
+import ScreenCaptureKit
 
 public struct MacAppDriverError: Error, CustomStringConvertible {
     public let description: String
@@ -78,6 +79,7 @@ public final class MacAppDriver: BombadilDriver {
     var process: Process?
     var app: AXUIElement?
     var actionError: String?
+    var screenshotDiagnostic: String?
 
     /// The launched app's process ID, for signal handlers that need to
     /// stop it when the driver is killed.
@@ -502,6 +504,84 @@ public final class MacAppDriver: BombadilDriver {
     static let modifierFlags: [String: CGEventFlags] = [
         "command": .maskCommand, "shift": .maskShift, "option": .maskAlternate, "control": .maskControl,
     ]
+
+    // MARK: Screenshots
+
+    /// Capture only the frontmost visible window owned by the launched
+    /// process, never a desktop crop (which could expose other apps).
+    public func screenshotPNG() -> Data? {
+        func omitted(_ reason: String) -> Data? {
+            if screenshotDiagnostic != reason {
+                log("screenshot_png omitted: \(reason)")
+                screenshotDiagnostic = reason
+            }
+            return nil
+        }
+        guard #available(macOS 14.0, *) else {
+            return omitted("window screenshots require macOS 14 or later")
+        }
+        guard let process, process.isRunning else {
+            return omitted("target app is not running")
+        }
+        guard CGPreflightScreenCaptureAccess() else {
+            return omitted("Screen Recording permission unavailable; allow this signed driver in System Settings > Privacy & Security > Screen Recording, then restart the driver")
+        }
+        let pid = process.processIdentifier
+        // WindowServer returns front-to-back order. Only use metadata for
+        // choosing a target-owned window; no screen pixels are captured here.
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let windowIDs = windows.compactMap { info -> CGWindowID? in
+            guard (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid else { return nil }
+            return (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value
+        }
+        let completed = DispatchSemaphore(value: 0)
+        var result: Result<Data, Error>?
+        SCShareableContent.getExcludingDesktopWindows(true, onScreenWindowsOnly: true) { content, error in
+            guard let content else {
+                result = .failure(error ?? MacAppDriverError("no shareable window content"))
+                completed.signal()
+                return
+            }
+            let window = windowIDs.lazy.compactMap { id in
+                content.windows.first {
+                    $0.windowID == id && $0.owningApplication?.processID == pid
+                        && $0.frame.width > 1 && $0.frame.height > 1
+                }
+            }.first
+            guard let window else {
+                result = .failure(MacAppDriverError("target app has no capturable on-screen window"))
+                completed.signal()
+                return
+            }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            config.width = Int(window.frame.width.rounded(.up))
+            config.height = Int(window.frame.height.rounded(.up))
+            config.showsCursor = false
+            config.ignoreShadowsSingleWindow = true
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, error in
+                if let image, let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) {
+                    result = .success(png)
+                } else {
+                    result = .failure(error ?? MacAppDriverError("window capture produced no PNG"))
+                }
+                completed.signal()
+            }
+        }
+        // The callback owns its result even if it arrives after timeout.
+        // Never read it without the semaphore establishing completion.
+        guard completed.wait(timeout: .now() + 10) == .success else {
+            return omitted("window capture timed out after 10s")
+        }
+        switch result {
+        case .success(let png):
+            screenshotDiagnostic = nil
+            return png
+        case .failure(let error): return omitted("\(error)")
+        case nil: return omitted("window capture returned no result")
+        }
+    }
 
     // MARK: AX helpers
 

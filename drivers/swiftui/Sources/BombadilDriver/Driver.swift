@@ -19,12 +19,16 @@ public protocol BombadilDriver: AnyObject {
     /// Performs `action` and returns the state the app settles into.
     func apply(_ action: JSONValue) throws -> JSONValue
 
+    /// Optional PNG of the state just returned by `start` or `apply`.
+    func screenshotPNG() -> Data?
+
     /// Shuts the app down.
     func stop()
 }
 
 extension BombadilDriver {
     public var stallTimeoutMs: Int? { nil }
+    public func screenshotPNG() -> Data? { nil }
 }
 
 /// Runs `driver` for one Bombadil session, reading Bombadil's messages
@@ -50,12 +54,14 @@ public func runDriver(
     try send(.hello(name: driver.name, stallTimeoutMs: driver.stallTimeoutMs))
     defer { driver.stop() }
     do {
-        try send(.state(driver.start()))
+        let initialState = try driver.start()
+        try send(.state(initialState, screenshotPNG: driver.screenshotPNG()))
         while let line = readLine() {
             if line.allSatisfy(\.isWhitespace) { continue }
             switch try decoder.decode(BombadilMessage.self, from: Data(line.utf8)) {
             case .apply(let action):
-                try send(.state(driver.apply(action)))
+                let state = try driver.apply(action)
+                try send(.state(state, screenshotPNG: driver.screenshotPNG()))
             case .terminate:
                 return
             }

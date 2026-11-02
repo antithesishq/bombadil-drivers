@@ -6,6 +6,7 @@ import XCTest
 final class FakeDriver: BombadilDriver {
     var applied: [JSONValue] = []
     var stopped = false
+    var screenshots: [Data?] = []
 
     let name = "fake"
 
@@ -15,6 +16,10 @@ final class FakeDriver: BombadilDriver {
         if action == "Crash" { throw CocoaError(.featureUnsupported) }
         applied.append(action)
         return ["applied": .int(applied.count)]
+    }
+
+    func screenshotPNG() -> Data? {
+        screenshots.indices.contains(applied.count) ? screenshots[applied.count] : nil
     }
 
     func stop() { stopped = true }
@@ -34,6 +39,36 @@ func session(_ driver: BombadilDriver, _ input: [String]) -> ([String], Error?) 
 }
 
 final class DriverTests: XCTestCase {
+    func testScreenshotsRoundTripBeforeTheNextInputWithoutReusingMissingCaptures() throws {
+        let png = try XCTUnwrap(Data(base64Encoded:
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII="))
+        let driver = FakeDriver()
+        driver.screenshots = [png, nil, png]
+        var output: [String] = []
+        var input = [
+            #"{"type":"apply","action":"First"}"#,
+            #"{"type":"apply","action":"Second"}"#,
+            #"{"type":"terminate"}"#,
+        ].makeIterator()
+        var reads = 0
+        try runDriver(driver, readLine: {
+            XCTAssertEqual(output.count, reads + 2, "state and capture must precede the next input")
+            reads += 1
+            return input.next()
+        }, writeLine: { output.append($0) })
+        let states = try output.dropFirst().map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        XCTAssertEqual(states.count, 3)
+        for index in [0, 2] {
+            let encoded = try XCTUnwrap(states[index]["screenshot_png"] as? String)
+            XCTAssertEqual(Data(base64Encoded: encoded), png)
+        }
+        XCTAssertNil(states[1]["screenshot_png"])
+        XCTAssertTrue(states.allSatisfy { ($0["state"] as? [String: Any])?["screenshot_png"] == nil })
+        XCTAssertTrue(driver.stopped)
+    }
+
     func testReportsAStateForTheStartAndEveryAppliedAction() {
         let driver = FakeDriver()
         let (output, error) = session(driver, [
