@@ -9,7 +9,10 @@ import java.util.concurrent.TimeUnit
 /** Runs `adb` against one device. */
 class Adb(val serial: String, private val adb: String = "adb") {
     /** Runs `adb -s <serial> <args>` and returns its stdout, failing on a nonzero exit. */
-    fun run(vararg args: String, timeoutSeconds: Long = 60): String {
+    fun run(vararg args: String, timeoutSeconds: Long = 60): String =
+        runBytes(*args, timeoutSeconds = timeoutSeconds).toString(Charsets.UTF_8)
+
+    fun runBytes(vararg args: String, timeoutSeconds: Long = 60): ByteArray {
         val command = listOf(adb, "-s", serial) + args
         val process = synchronized(this) {
             check(!cancelled) { "cancelled" }
@@ -19,7 +22,7 @@ class Adb(val serial: String, private val adb: String = "adb") {
         val stderr = StringBuilder()
         val stderrReader = Thread { stderr.append(process.errorStream.bufferedReader().readText()) }
             .apply { start() }
-        val stdout = process.inputStream.bufferedReader().readText()
+        val stdout = process.inputStream.readBytes()
         if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
             process.destroyForcibly()
             error("timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}")
@@ -27,7 +30,7 @@ class Adb(val serial: String, private val adb: String = "adb") {
         stderrReader.join()
         check(!cancelled) { "cancelled" }
         check(process.exitValue() == 0) {
-            "`${command.joinToString(" ")}` exited with ${process.exitValue()}: $stderr$stdout".trim()
+            "`${command.joinToString(" ")}` exited with ${process.exitValue()}: $stderr${stdout.toString(Charsets.UTF_8)}".trim()
         }
         return stdout
     }
@@ -75,4 +78,3 @@ class Adb(val serial: String, private val adb: String = "adb") {
         private val heldLocks = mutableListOf<FileLock>()
     }
 }
-

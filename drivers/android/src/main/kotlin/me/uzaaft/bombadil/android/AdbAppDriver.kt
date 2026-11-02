@@ -208,6 +208,8 @@ class AdbAppDriver(
         return settleAfterAgent(action, started, result)
     }
 
+    override fun screenshotPng(): ByteArray = adb.runBytes("exec-out", "screencap", "-p", timeoutSeconds = 10)
+
     override fun cancel() {
         helper.cancel()
         agent?.cancel()

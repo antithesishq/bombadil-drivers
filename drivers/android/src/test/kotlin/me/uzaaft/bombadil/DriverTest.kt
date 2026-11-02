@@ -38,6 +38,19 @@ class DriverTest {
     }
 
     @Test
+    fun attachesScreenshotsToTheirStates() {
+        val fake = FakeDriver()
+        val driver = object : BombadilDriver by fake {
+            override fun screenshotPng() = byteArrayOf(137.toByte(), 80, fake.applied.size.toByte(), 255.toByte())
+        }
+        val output = mutableListOf<String>()
+        session(driver, listOf("""{"type":"apply","action":"Back"}"""), output)
+        val states = output.drop(1).map { Json.parseToJsonElement(it).jsonObject }
+        assertEquals(listOf("iVAA/w==", "iVAB/w=="), states.map { it["screenshot_png"]!!.jsonPrimitive.content })
+        assertEquals(Json.parseToJsonElement("""{"applied":1}"""), states.last()["state"])
+    }
+
+    @Test
     fun reportsAStateForTheStartAndEveryAppliedAction() {
         val driver = FakeDriver()
         val output = mutableListOf<String>()

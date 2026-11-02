@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.util.Base64
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
@@ -37,6 +38,8 @@ interface BombadilDriver {
 
     /** Performs [action] and returns the state the app settles into. */
     fun apply(action: JsonElement): JsonElement
+
+    fun screenshotPng(): ByteArray? = null
 
     /** Shuts the app down. */
     fun stop()
@@ -85,6 +88,7 @@ fun runDriver(
     fun state(state: JsonElement) = send(buildJsonObject {
         put("type", "state")
         put("state", state)
+        driver.screenshotPng()?.let { put("screenshot_png", Base64.getEncoder().encodeToString(it)) }
     })
 
     send(buildJsonObject {
