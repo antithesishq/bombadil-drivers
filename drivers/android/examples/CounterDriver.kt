@@ -15,6 +15,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import me.uzaaft.bombadil.BombadilDriver
+import me.uzaaft.bombadil.StateResult
 import me.uzaaft.bombadil.runDriver
 
 class CounterDriver : BombadilDriver {
@@ -24,16 +25,16 @@ class CounterDriver : BombadilDriver {
 
     private val state get() = buildJsonObject { put("count", count) }
 
-    override fun start(): JsonElement = state
+    override fun start() = StateResult(state)
 
-    override fun apply(action: JsonElement): JsonElement {
+    override fun apply(action: JsonElement): StateResult {
         when {
             action is JsonObject && "Increment" in action ->
                 count += action["Increment"]!!.jsonObject["by"]!!.jsonPrimitive.int
             action == JsonPrimitive("Reset") -> count = 0
             else -> error("unknown action: $action")
         }
-        return state
+        return StateResult(state)
     }
 
     override fun stop() {}

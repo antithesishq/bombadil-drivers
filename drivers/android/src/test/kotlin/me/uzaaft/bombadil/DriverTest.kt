@@ -4,8 +4,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import kotlinx.serialization.json.put
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -18,12 +20,12 @@ class FakeDriver : BombadilDriver {
 
     override val name = "fake"
 
-    override fun start(): JsonElement = buildJsonObject { put("applied", 0) }
+    override fun start() = StateResult(buildJsonObject { put("applied", 0) }, timestampUs = 1_000_000)
 
-    override fun apply(action: JsonElement): JsonElement {
+    override fun apply(action: JsonElement): StateResult {
         if (action == JsonPrimitive("Crash")) error("crashed")
         applied += action
-        return buildJsonObject { put("applied", applied.size) }
+        return StateResult(buildJsonObject { put("applied", applied.size) }, timestampUs = 1_000_000L + applied.size)
     }
 
     override fun stop() {
@@ -67,9 +69,9 @@ class DriverTest {
         assertEquals(
             listOf(
                 """{"type":"hello","protocol":0,"name":"fake"}""",
-                """{"type":"state","state":{"applied":0}}""",
-                """{"type":"state","state":{"applied":1}}""",
-                """{"type":"state","state":{"applied":2}}""",
+                """{"type":"state","state":{"applied":0},"settled":true,"timestamp_us":1000000}""",
+                """{"type":"state","state":{"applied":1},"settled":true,"timestamp_us":1000001}""",
+                """{"type":"state","state":{"applied":2},"settled":true,"timestamp_us":1000002}""",
             ).map(Json::parseToJsonElement),
             output.map(Json::parseToJsonElement),
         )
@@ -98,7 +100,7 @@ class DriverTest {
         val cancelled = java.util.concurrent.CountDownLatch(1)
         val fake = FakeDriver()
         val driver = object : BombadilDriver by fake {
-            override fun apply(action: JsonElement): JsonElement {
+            override fun apply(action: JsonElement): StateResult {
                 // Stands in for a slow action that cancelling aborts.
                 check(cancelled.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "not cancelled" }
                 error("aborted")
@@ -124,5 +126,55 @@ class DriverTest {
         assertEquals("error", last["type"]!!.jsonPrimitive.content)
         assertTrue("crashed" in last["message"]!!.jsonPrimitive.content)
         assertTrue(driver.stopped)
+    }
+
+    @Test
+    fun sendsExplicitMetadataWithoutChangingAppStateAndClampsTimestamps() {
+        val appState = JsonPrimitive("unchanged")
+        val driver = object : BombadilDriver by FakeDriver() {
+            override fun start() = StateResult(appState, timestampUs = 123)
+            override fun apply(action: JsonElement) = StateResult(appState, false, "no matching node", 100)
+        }
+        val output = mutableListOf<String>()
+        session(driver, listOf("""{"type":"apply","action":"Back"}"""), output)
+        val states = output.drop(1).map { Json.parseToJsonElement(it).jsonObject }
+        assertEquals(listOf(123L, 123L), states.map { it.getValue("timestamp_us").jsonPrimitive.long })
+        assertEquals(listOf(true, false), states.map { it.getValue("settled").jsonPrimitive.boolean })
+        assertTrue("not_applied" !in states.first())
+        assertEquals(JsonPrimitive("no matching node"), states.last()["not_applied"])
+        assertTrue(states.all { it["state"] == appState && "screenshot_png" !in it })
+    }
+
+    @Test
+    fun rejectsNotAppliedOnInitialStateAndStops() {
+        val fake = FakeDriver()
+        val driver = object : BombadilDriver by fake {
+            override fun start() = StateResult(JsonPrimitive(0), notApplied = "invalid")
+        }
+        val output = mutableListOf<String>()
+        assertFailsWith<IllegalArgumentException> { session(driver, emptyList(), output) }
+        assertEquals(listOf("hello", "error"), output.map { Json.parseToJsonElement(it).jsonObject["type"]!!.jsonPrimitive.content })
+        assertTrue(fake.stopped)
+    }
+
+    @Test
+    fun defaultTimestampIsHostEpochAtCaptureNotScreenshotTime() {
+        val before = System.currentTimeMillis() * 1_000
+        val captured = StateResult(JsonPrimitive(0))
+        var screenshotTimestamp = 0L
+        val driver = object : BombadilDriver by FakeDriver() {
+            override fun start() = captured
+            override fun screenshotPng(): ByteArray? {
+                Thread.sleep(10)
+                screenshotTimestamp = System.currentTimeMillis() * 1_000
+                return null
+            }
+        }
+        val output = mutableListOf<String>()
+        session(driver, emptyList(), output)
+        val timestamp = Json.parseToJsonElement(output.last()).jsonObject.getValue("timestamp_us").jsonPrimitive.long
+        assertEquals(captured.timestampUs, timestamp)
+        assertTrue(timestamp >= before)
+        assertTrue(timestamp < screenshotTimestamp)
     }
 }

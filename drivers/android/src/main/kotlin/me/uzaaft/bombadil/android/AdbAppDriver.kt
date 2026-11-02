@@ -14,6 +14,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import me.uzaaft.bombadil.BombadilDriver
+import me.uzaaft.bombadil.StateResult
 import me.uzaaft.bombadil.runDriver
 import java.io.File
 
@@ -139,8 +140,10 @@ class AdbAppDriver(
     /** Hand-offs the agent blocked during the current step. */
     private val blockedIntents = ArrayList<JsonElement>()
     private var state: JsonObject? = null
+    private var lastTimestampUs = Long.MIN_VALUE
 
-    override fun start(): JsonElement {
+    override fun start(): StateResult {
+        lastTimestampUs = Long.MIN_VALUE
         adb.run("wait-for-device", timeoutSeconds = 60)
         waitUntil(60_000, "boot") { adb.shell("getprop sys.boot_completed").trim() == "1" }
         for (setting in listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")) {
@@ -164,7 +167,7 @@ class AdbAppDriver(
         return settle(JsonNull, started, initial = true)
     }
 
-    override fun apply(action: JsonElement): JsonElement {
+    override fun apply(action: JsonElement): StateResult {
         val started = System.nanoTime()
         step.clear()
         val (tag, args) = when (action) {
@@ -201,11 +204,20 @@ class AdbAppDriver(
                 else -> error("unknown action `$tag`")
             }
         }
-        if (result != null && result["done"]?.jsonPrimitive?.boolean == false) {
+        if (result != null && result["done"] == JsonPrimitive(false)) {
             log("$action not done: ${result["reason"]?.jsonPrimitive?.content}")
         }
-        if (agent == null || tag == "Home") return settle(action, started, fromTop = if (agent != null) lastTop else null)
-        return settleAfterAgent(action, started, result)
+        val notApplied = when {
+            result == null && (agent == null || agent.connected) -> "action target not found"
+            result?.get("done") == JsonPrimitive(false) -> result["reason"]?.jsonPrimitive?.contentOrNull ?: "action refused"
+            else -> null
+        }
+        val fresh = if (agent == null || tag == "Home") {
+            settle(action, started, fromTop = if (agent != null) lastTop else null)
+        } else {
+            settleAfterAgent(action, started, result)
+        }
+        return fresh.copy(notApplied = notApplied)
     }
 
     override fun screenshotPng(): ByteArray = adb.runBytes("exec-out", "screencap", "-p", timeoutSeconds = 10)
@@ -322,7 +334,7 @@ class AdbAppDriver(
      * so that sessions start from the same state. If the app's own windows
      * are then in front, the agent's view of them replaces the helper's.
      */
-    private fun settle(lastAction: JsonElement, started: Long, initial: Boolean = false, fromTop: String? = null): JsonElement {
+    private fun settle(lastAction: JsonElement, started: Long, initial: Boolean = false, fromTop: String? = null): StateResult {
         val acted = System.nanoTime()
         val response = when {
             initial -> helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
@@ -338,8 +350,9 @@ class AdbAppDriver(
         record(if (initial) "settle" else if (fromTop != null) "await" else "next", response, helper, acted)
         inAgent = false
         val fresh = response.getValue("state").jsonObject
+        val captured = helperResult(response)
         val inApp = fresh["package"]?.jsonPrimitive?.contentOrNull == packageName
-        return finish(lastAction, started, initial, (if (inApp) agentState() else null) ?: fresh)
+        return finish(lastAction, started, initial, (if (inApp) agentState() else null) ?: captured)
     }
 
     /**
@@ -348,7 +361,7 @@ class AdbAppDriver(
      * leaving its activity (another one starting, or this one finishing),
      * the helper's view once the system has switched activities.
      */
-    private fun settleAfterAgent(lastAction: JsonElement, started: Long, result: JsonObject?): JsonElement {
+    private fun settleAfterAgent(lastAction: JsonElement, started: Long, result: JsonObject?): StateResult {
         if (result != null) record("agent", result, agent!!, started)
         val leaving = result?.get("leaving")?.jsonPrimitive?.boolean == true
         if (leaving) return settle(lastAction, started, fromTop = result!!["from"]?.jsonPrimitive?.contentOrNull ?: lastTop)
@@ -361,11 +374,20 @@ class AdbAppDriver(
         val response = helper.request("settle", "quietMs" to quietMs, "timeoutMs" to settleTimeoutMs)
         record("settle", response, helper, acted)
         inAgent = false
-        return finish(lastAction, started, false, response.getValue("state").jsonObject)
+        return finish(lastAction, started, false, helperResult(response))
     }
 
+    private fun helperResult(response: JsonObject) = StateResult(
+        response.getValue("state"),
+        // Only positive stability/quiet signals establish settling. A cap,
+        // timeout (no observed response), or unknown signal does not.
+        settled = response["stable"] == JsonPrimitive(true) ||
+            response["signal"]?.jsonPrimitive?.content in setOf("frame", "activity", "window"),
+        timestampUs = helper.lastResponseTimestampUs,
+    )
+
     /** The agent's state of the app, if it has one: its windows are in front and its main thread answers. */
-    private fun agentState(): JsonObject? {
+    private fun agentState(): StateResult? {
         val agent = agent?.takeIf { it.connected } ?: return null
         val acted = System.nanoTime()
         val response = attempt("agent") { agent.request("state", "capMs" to agentCapMs) } ?: return null
@@ -373,7 +395,7 @@ class AdbAppDriver(
         return agentResult(response)
     }
 
-    private fun agentResult(response: JsonObject): JsonObject? {
+    private fun agentResult(response: JsonObject): StateResult? {
         val state = response["state"]?.jsonObject
         if (state == null || response["focused"]?.jsonPrimitive?.boolean != true) {
             inAgent = false
@@ -381,7 +403,7 @@ class AdbAppDriver(
         }
         inAgent = true
         lastTop = response["top"]?.jsonPrimitive?.contentOrNull
-        return state
+        return StateResult(state, settled = response["settled"] == JsonPrimitive(true), timestampUs = agent!!.lastResponseTimestampUs)
     }
 
     /** Runs a request to the agent, or, if it fails (the app died), forgets the agent for this session. */
@@ -411,7 +433,8 @@ class AdbAppDriver(
         step["path"] = JsonPrimitive(listOfNotNull(step["path"]?.jsonPrimitive?.content, what).joinToString("+"))
     }
 
-    private fun finish(lastAction: JsonElement, started: Long, initial: Boolean, fresh: JsonObject): JsonElement {
+    private fun finish(lastAction: JsonElement, started: Long, initial: Boolean, captured: StateResult): StateResult {
+        val fresh = captured.state.jsonObject
         state = fresh
         timingLog?.appendText(
             JsonObject(
@@ -425,7 +448,11 @@ class AdbAppDriver(
         step.clear()
         val blocked = JsonArray(blockedIntents.toList())
         blockedIntents.clear()
-        return JsonObject(fresh + ("lastAction" to lastAction) + ("blockedIntents" to blocked))
+        lastTimestampUs = maxOf(lastTimestampUs, captured.timestampUs)
+        return captured.copy(
+            state = JsonObject(fresh + ("lastAction" to lastAction) + ("blockedIntents" to blocked)),
+            timestampUs = lastTimestampUs,
+        )
     }
 
     private fun waitUntil(timeoutMs: Long, what: String, condition: () -> Boolean) {

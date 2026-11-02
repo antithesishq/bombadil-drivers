@@ -7,6 +7,7 @@ import kotlinx.serialization.json.buildJsonObject
 import java.io.BufferedReader
 import java.io.Writer
 import java.net.Socket
+import java.time.Instant
 
 /**
  * A line-delimited JSON connection to an abstract socket on the device,
@@ -25,6 +26,9 @@ open class DeviceSocket(protected val adb: Adb, private val socketName: String) 
         private set
     var lastParseMs = 0.0
         private set
+    /** Host epoch microseconds when the last complete response arrived. */
+    var lastResponseTimestampUs = 0L
+        private set
 
     val connected get() = writer != null
 
@@ -39,6 +43,7 @@ open class DeviceSocket(protected val adb: Adb, private val socketName: String) 
             close()
             error("$socketName closed the connection")
         }
+        lastResponseTimestampUs = Instant.now().let { it.epochSecond * 1_000_000 + it.nano / 1_000 }
         val parsing = System.nanoTime()
         val response = Json.parseToJsonElement(line) as JsonObject
         lastResponseBytes = line.length

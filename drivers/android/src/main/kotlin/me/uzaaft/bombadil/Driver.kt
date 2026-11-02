@@ -8,6 +8,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.time.Instant
 import java.util.Base64
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.atomic.AtomicBoolean
@@ -15,6 +16,16 @@ import kotlin.concurrent.thread
 
 /** Version of Bombadil's external driver protocol this library speaks. */
 const val PROTOCOL_VERSION = 0
+
+/** An app state and the metadata for its top-level protocol message. */
+data class StateResult(
+    val state: JsonElement,
+    val settled: Boolean = true,
+    /** Why the action was skipped/refused; must be null for the initial state. */
+    val notApplied: String? = null,
+    /** Host epoch microseconds at state capture/receipt, before screenshot encoding. */
+    val timestampUs: Long = Instant.now().let { it.epochSecond * 1_000_000 + it.nano / 1_000 },
+)
 
 /**
  * Drives one app session for Bombadil.
@@ -33,11 +44,11 @@ interface BombadilDriver {
      */
     val stallTimeoutMs: Long? get() = null
 
-    /** Launches the app and returns its first settled state. */
-    fun start(): JsonElement
+    /** Launches the app and returns its first state, without [StateResult.notApplied]. */
+    fun start(): StateResult
 
-    /** Performs [action] and returns the state the app settles into. */
-    fun apply(action: JsonElement): JsonElement
+    /** Performs [action] and returns the resulting state and capture metadata. */
+    fun apply(action: JsonElement): StateResult
 
     fun screenshotPng(): ByteArray? = null
 
@@ -85,11 +96,19 @@ fun runDriver(
     writeLine: (String) -> Unit = { println(it); System.out.flush() },
 ) {
     fun send(message: JsonObject) = writeLine(message.toString())
-    fun state(state: JsonElement) = send(buildJsonObject {
-        put("type", "state")
-        put("state", state)
-        driver.screenshotPng()?.let { put("screenshot_png", Base64.getEncoder().encodeToString(it)) }
-    })
+    var lastTimestampUs = Long.MIN_VALUE
+    fun state(result: StateResult, initial: Boolean = false) {
+        require(!initial || result.notApplied == null) { "initial state cannot have not_applied" }
+        lastTimestampUs = maxOf(lastTimestampUs, result.timestampUs)
+        send(buildJsonObject {
+            put("type", "state")
+            put("state", result.state)
+            put("settled", result.settled)
+            result.notApplied?.let { put("not_applied", it) }
+            put("timestamp_us", lastTimestampUs)
+            driver.screenshotPng()?.let { put("screenshot_png", Base64.getEncoder().encodeToString(it)) }
+        })
+    }
 
     send(buildJsonObject {
         put("type", "hello")
@@ -119,7 +138,7 @@ fun runDriver(
         }
     }
     try {
-        state(driver.start())
+        state(driver.start(), initial = true)
         while (true) {
             when (val message = messages.take().getOrThrow()) {
                 is BombadilMessage.Apply -> state(driver.apply(message.action))
