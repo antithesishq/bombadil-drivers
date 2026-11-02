@@ -6,18 +6,19 @@ import 'protocol.dart';
 
 /// Drives one app session for Bombadil.
 ///
-/// States and actions are JSON values (maps, lists, strings, numbers,
-/// booleans and null) whose shape the driver and the specification agree
-/// on.
+/// [State.state] and actions are arbitrary JSON values whose shape the
+/// driver and the specification agree on. Protocol metadata lives on [State],
+/// outside the application JSON.
 abstract interface class BombadilDriver {
   /// Name reported to Bombadil in the handshake.
   String get name;
 
-  /// Launches the app and returns its first settled state.
-  Future<Object?> start();
+  /// Launches the app and returns its first state, without [State.notApplied].
+  Future<State> start();
 
-  /// Performs [action] and returns the state the app settles into.
-  Future<Object?> apply(Object? action);
+  /// Performs [action] and returns its resulting state, including whether
+  /// it settled and, if it did not apply, the actual reason.
+  Future<State> apply(Object? action);
 
   Future<List<int>?> screenshotPng();
 
@@ -39,6 +40,24 @@ Future<void> runDriver(
   final sink = output ?? stdout;
   void send(DriverMessage message) => sink.writeln(message.encode());
 
+  int? previousTimestamp;
+  Future<void> sendState(State state) async {
+    final captured = state.timestampUs ?? DateTime.now().microsecondsSinceEpoch;
+    final timestamp = previousTimestamp != null && captured < previousTimestamp!
+        ? previousTimestamp!
+        : captured;
+    previousTimestamp = timestamp;
+    send(
+      State(
+        state.state,
+        settled: state.settled,
+        notApplied: state.notApplied,
+        timestampUs: timestamp,
+        screenshotPng: state.screenshotPng ?? await driver.screenshotPng(),
+      ),
+    );
+  }
+
   final lines = (input ?? stdin)
       .transform(utf8.decoder)
       .transform(const LineSplitter())
@@ -47,12 +66,15 @@ Future<void> runDriver(
   send(Hello(driver.name, stallTimeout: stallTimeout));
   try {
     final initial = await driver.start();
-    send(State(initial, screenshotPng: await driver.screenshotPng()));
+    if (initial.notApplied != null) {
+      throw StateError('initial state must not contain not_applied');
+    }
+    await sendState(initial);
     await for (final line in lines) {
       switch (BombadilMessage.fromJson(jsonDecode(line))) {
         case Apply(:final action):
           final state = await driver.apply(action);
-          send(State(state, screenshotPng: await driver.screenshotPng()));
+          await sendState(state);
         case Terminate():
           return;
       }

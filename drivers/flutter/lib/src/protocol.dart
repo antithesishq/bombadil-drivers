@@ -33,28 +33,54 @@ class Hello extends DriverMessage {
 }
 
 class State extends DriverMessage {
-  const State(this.state, {this.screenshotPng});
+  const State(
+    this.state, {
+    this.settled = true,
+    this.notApplied,
+    this.timestampUs,
+    this.screenshotPng,
+  });
 
   /// Any JSON-encodable value describing the app, or [EncodedJson].
   final Object? state;
+
+  /// Whether the app went quiet before this state was captured.
+  final bool settled;
+
+  /// Why the requested action did not apply; forbidden on the initial state.
+  final String? notApplied;
+
+  /// Capture time in host epoch microseconds, not the app's virtual clock.
+  /// [runDriver] supplies this if omitted and clamps backward clock changes
+  /// to the previous state's time.
+  final int? timestampUs;
   final List<int>? screenshotPng;
 
-  @override
-  Map<String, Object?> toJson() => {
+  Map<String, Object?> get _metadata => {
     'type': 'state',
-    'state': switch (state) {
-      EncodedJson(:final json) => jsonDecode(json),
-      final state => state,
-    },
+    'settled': settled,
+    if (notApplied case final reason?) 'not_applied': reason,
+    if (timestampUs case final timestamp?) 'timestamp_us': timestamp,
     if (screenshotPng case final bytes?) 'screenshot_png': base64Encode(bytes),
   };
 
   @override
-  String encode() => switch (state) {
-    EncodedJson(:final json) =>
-      '{"type":"state","state":$json${screenshotPng == null ? '' : ',"screenshot_png":"${base64Encode(screenshotPng!)}"'}}',
-    _ => super.encode(),
+  Map<String, Object?> toJson() => {
+    ..._metadata,
+    'state': switch (state) {
+      EncodedJson(:final json) => jsonDecode(json),
+      final state => state,
+    },
   };
+
+  @override
+  String encode() {
+    if (state case EncodedJson(:final json)) {
+      final metadata = jsonEncode(_metadata);
+      return '${metadata.substring(0, metadata.length - 1)},"state":$json}';
+    }
+    return super.encode();
+  }
 }
 
 /// A state the driver has already encoded as JSON, so that it can time or

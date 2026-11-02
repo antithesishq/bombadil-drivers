@@ -125,12 +125,19 @@ class FlutterAppDriver implements BombadilDriver, ActionTarget {
   }
 
   @override
-  Future<Object?> start() async {
+  Future<State> start() async {
     binding.clock.startStep();
     final elapsed = Stopwatch()..start();
     while (true) {
       final settled = await _settle(startupCap - elapsed.elapsed);
-      if (_root != null) return _state(settled, null);
+      if (_root != null) {
+        final state = _state(settled, null);
+        return State(
+          state,
+          settled: settled,
+          timestampUs: DateTime.now().microsecondsSinceEpoch,
+        );
+      }
       final left = startupCap - elapsed.elapsed;
       if (left <= Duration.zero) {
         throw StateError(
@@ -145,7 +152,7 @@ class FlutterAppDriver implements BombadilDriver, ActionTarget {
   }
 
   @override
-  Future<Object?> apply(Object? json) async {
+  Future<State> apply(Object? json) async {
     final action = DriverAction.parse(json);
     final step = Stopwatch()..start();
     binding.clock.startStep();
@@ -170,6 +177,7 @@ class FlutterAppDriver implements BombadilDriver, ActionTarget {
       'ok': error == null,
       'error': ?error,
     });
+    final timestampUs = DateTime.now().microsecondsSinceEpoch;
     final captured = step.elapsed;
     final encoded = EncodedJson(jsonEncode(state));
     if (timing) {
@@ -184,7 +192,12 @@ class FlutterAppDriver implements BombadilDriver, ActionTarget {
         'bytes=${encoded.json.length} settled=$settled',
       );
     }
-    return encoded;
+    return State(
+      encoded,
+      settled: settled,
+      notApplied: error,
+      timestampUs: timestampUs,
+    );
   }
 
   Map<String, Object?> _state(bool settled, Map<String, Object?>? lastAction) {

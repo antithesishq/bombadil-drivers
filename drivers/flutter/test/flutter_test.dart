@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:ui' as ui;
 
 import 'package:bombadil_flutter/src/flutter/actions.dart';
+import 'package:bombadil_flutter/src/flutter/app_driver.dart';
+import 'package:bombadil_flutter/src/flutter/binding.dart';
+import 'package:bombadil_flutter/src/flutter/platform.dart';
 import 'package:bombadil_flutter/src/flutter/semantics.dart';
 import 'package:bombadil_flutter/src/flutter/settle.dart';
 import 'package:flutter/material.dart';
@@ -117,7 +121,81 @@ class _CounterState extends State<Counter> {
   );
 }
 
+/// Supplies real widget semantics with controlled activity for driver tests.
+class DriverBinding extends Fake implements BombadilBinding {
+  DriverBinding(this.tester);
+
+  final WidgetTester tester;
+
+  @override
+  final clock = FrameClock();
+  @override
+  final monitor = AppMonitor();
+  @override
+  final platform = PlatformState();
+  @override
+  Zone get driverZone => Zone.current;
+  @override
+  Zone get appZone => Zone.current;
+  @override
+  String? busy;
+  @override
+  get renderViews => tester.binding.renderViews;
+  @override
+  get platformDispatcher => tester.binding.platformDispatcher;
+  @override
+  Future<void> back() async {}
+}
+
 void main() {
+  testWidgets('app driver reports settling, capture time and real rejection', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(const Counter());
+    final binding = DriverBinding(tester);
+    final driver = FlutterAppDriver(
+      binding,
+      name: 'test',
+      settleCap: Duration.zero,
+      startupCap: Duration.zero,
+    );
+    await tester.runAsync(() async {
+      final before = DateTime.now().microsecondsSinceEpoch;
+      final initial = await driver.start();
+      expect(initial.settled, isTrue);
+      expect(initial.notApplied, isNull);
+      expect(
+        initial.timestampUs,
+        inInclusiveRange(before, DateTime.now().microsecondsSinceEpoch),
+      );
+
+      binding.busy = 'frame';
+      final unsettledInitial = await driver.start();
+      expect(unsettledInitial.settled, isFalse);
+      expect(unsettledInitial.notApplied, isNull);
+      final rejected = await driver.apply({
+        'Tap': {'node': 'missing'},
+      });
+      final envelope = jsonDecode(rejected.encode()) as Map;
+      expect(envelope['settled'], isFalse);
+      expect(envelope['not_applied'], 'no node missing');
+      expect(
+        envelope['timestamp_us'],
+        greaterThanOrEqualTo(initial.timestampUs!),
+      );
+      expect(envelope['state']['lastAction']['error'], 'no node missing');
+      expect(envelope['state']['tree'], isNotNull);
+
+      binding.busy = null;
+      final applied = jsonDecode((await driver.apply('Back')).encode()) as Map;
+      expect(applied['settled'], isTrue);
+      expect(applied.containsKey('not_applied'), isFalse);
+      expect(applied['state']['lastAction']['ok'], isTrue);
+    });
+    handle.dispose();
+  });
+
   group('semantics', () {
     testWidgets('reports labels, flags, actions and logical rects', (
       tester,

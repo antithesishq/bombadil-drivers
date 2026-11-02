@@ -9,18 +9,20 @@ class FakeDriver implements BombadilDriver {
   final applied = <Object?>[];
   var stopped = false;
   var capture = false;
+  State? initial;
+  State? result;
 
   @override
   String get name => 'fake';
 
   @override
-  Future<Object?> start() async => {'applied': 0};
+  Future<State> start() async => initial ?? const State({'applied': 0});
 
   @override
-  Future<Object?> apply(Object? action) async {
+  Future<State> apply(Object? action) async {
     if (action == 'Crash') throw StateError('crashed');
     applied.add(action);
-    return {'applied': applied.length};
+    return result ?? State({'applied': applied.length});
   }
 
   @override
@@ -75,7 +77,11 @@ void main() {
         const EncodedJson('{"applied":1}'),
         {'applied': 1},
       ]) {
-        final message = State(state, screenshotPng: [137, 80, 1, 255]);
+        final message = State(
+          state,
+          screenshotPng: [137, 80, 1, 255],
+          timestampUs: (sent[2] as Map)['timestamp_us'] as int,
+        );
         expect(jsonDecode(message.encode()), sent[2]);
         expect(message.toJson(), sent[2]);
       }
@@ -90,18 +96,30 @@ void main() {
       '{"type":"terminate"}',
       '{"type":"apply","action":"AfterTerminate"}',
     ]);
+    final timestamps = sent
+        .skip(1)
+        .map((s) => (s as Map)['timestamp_us'] as int)
+        .toList();
+    expect(timestamps, orderedEquals([...timestamps]..sort()));
+    expect(timestamps.first, greaterThan(1700000000000000));
+    for (final state in sent.skip(1)) {
+      (state as Map).remove('timestamp_us');
+    }
     expect(sent, [
       {'type': 'hello', 'protocol': 0, 'name': 'fake'},
       {
         'type': 'state',
+        'settled': true,
         'state': {'applied': 0},
       },
       {
         'type': 'state',
+        'settled': true,
         'state': {'applied': 1},
       },
       {
         'type': 'state',
+        'settled': true,
         'state': {'applied': 2},
       },
     ]);
@@ -112,6 +130,84 @@ void main() {
       'Back',
     ]);
     expect(error, isNull);
+    expect(driver.stopped, isTrue);
+  });
+
+  test('preserves arbitrary JSON and metadata on both encoding paths', () {
+    for (final app in [
+      null,
+      true,
+      42,
+      'text',
+      [1, null],
+      {'settled': 'app data'},
+    ]) {
+      for (final payload in [app, EncodedJson(jsonEncode(app))]) {
+        final message = State(
+          payload,
+          settled: false,
+          notApplied: 'no node "missing"\ntry again',
+          timestampUs: 1700000000000001,
+          screenshotPng: [137, 80, 1, 255],
+        );
+        final expected = {
+          'type': 'state',
+          'state': app,
+          'settled': false,
+          'not_applied': 'no node "missing"\ntry again',
+          'timestamp_us': 1700000000000001,
+          'screenshot_png': 'iVAB/w==',
+        };
+        expect(message.toJson(), expected);
+        expect(jsonDecode(message.encode()), expected);
+      }
+    }
+  });
+
+  test('sends metadata and clamps backward capture times', () async {
+    final driver = FakeDriver()
+      ..initial = const State(
+        null,
+        settled: false,
+        timestampUs: 1700000000000002,
+      )
+      ..result = const State(
+        EncodedJson('["unchanged"]'),
+        settled: false,
+        notApplied: 'no node missing',
+        timestampUs: 1700000000000001,
+      );
+    final (sent, error) = await session(driver, [
+      '{"type":"apply","action":"Back"}',
+    ]);
+    expect(error, isNull);
+    expect(sent[1], {
+      'type': 'state',
+      'state': null,
+      'settled': false,
+      'timestamp_us': 1700000000000002,
+    });
+    expect(sent[2], {
+      'type': 'state',
+      'state': ['unchanged'],
+      'settled': false,
+      'not_applied': 'no node missing',
+      'timestamp_us': 1700000000000002,
+    });
+  });
+
+  test('rejects not_applied on the initial state and stops', () async {
+    final driver = FakeDriver()
+      ..initial = const State(null, notApplied: 'invalid');
+    final (sent, error) = await session(driver, []);
+    expect(error, isStateError);
+    expect(sent, [
+      {'type': 'hello', 'protocol': 0, 'name': 'fake'},
+      {
+        'type': 'error',
+        'message': 'Bad state: initial state must not contain not_applied',
+      },
+    ]);
     expect(driver.stopped, isTrue);
   });
 
