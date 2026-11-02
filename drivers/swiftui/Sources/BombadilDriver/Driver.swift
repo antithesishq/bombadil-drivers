@@ -13,6 +13,9 @@ public protocol BombadilDriver: AnyObject {
     /// 30 seconds.
     var stallTimeoutMs: Int? { get }
 
+    /// Metadata sampled immediately after `start` or `apply` returns.
+    var stateMetadata: StateMetadata { get }
+
     /// Launches the app and returns its first settled state.
     func start() throws -> JSONValue
 
@@ -29,6 +32,12 @@ public protocol BombadilDriver: AnyObject {
 extension BombadilDriver {
     public var stallTimeoutMs: Int? { nil }
     public func screenshotPNG() -> Data? { nil }
+    public var stateMetadata: StateMetadata { StateMetadata() }
+}
+
+private enum StateMetadataError: Error {
+    case initialStateNotApplied
+    case timestampDecreased
 }
 
 /// Runs `driver` for one Bombadil session, reading Bombadil's messages
@@ -51,17 +60,28 @@ public func runDriver(
         writeLine(String(decoding: try encoder.encode(message), as: UTF8.self))
     }
 
+    var lastTimestamp: UInt64 = 0
+    func sendState(_ state: JSONValue, initial: Bool = false) throws {
+        var metadata = driver.stateMetadata
+        if initial && metadata.notApplied != nil { throw StateMetadataError.initialStateNotApplied }
+        if let timestamp = metadata.timestampUs {
+            guard timestamp >= lastTimestamp else { throw StateMetadataError.timestampDecreased }
+        } else {
+            metadata.timestampUs = max(lastTimestamp, UInt64(max(0, Date().timeIntervalSince1970 * 1_000_000)))
+        }
+        lastTimestamp = metadata.timestampUs!
+        try send(.state(state, screenshotPNG: driver.screenshotPNG(), metadata: metadata))
+    }
+
     try send(.hello(name: driver.name, stallTimeoutMs: driver.stallTimeoutMs))
     defer { driver.stop() }
     do {
-        let initialState = try driver.start()
-        try send(.state(initialState, screenshotPNG: driver.screenshotPNG()))
+        try sendState(driver.start(), initial: true)
         while let line = readLine() {
             if line.allSatisfy(\.isWhitespace) { continue }
             switch try decoder.decode(BombadilMessage.self, from: Data(line.utf8)) {
             case .apply(let action):
-                let state = try driver.apply(action)
-                try send(.state(state, screenshotPNG: driver.screenshotPNG()))
+                try sendState(driver.apply(action))
             case .terminate:
                 return
             }

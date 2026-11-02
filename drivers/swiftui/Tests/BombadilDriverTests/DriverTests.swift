@@ -7,6 +7,8 @@ final class FakeDriver: BombadilDriver {
     var applied: [JSONValue] = []
     var stopped = false
     var screenshots: [Data?] = []
+    var stateMetadata = StateMetadata()
+    var appliedMetadata: StateMetadata?
 
     let name = "fake"
 
@@ -15,6 +17,7 @@ final class FakeDriver: BombadilDriver {
     func apply(_ action: JSONValue) throws -> JSONValue {
         if action == "Crash" { throw CocoaError(.featureUnsupported) }
         applied.append(action)
+        if let appliedMetadata { stateMetadata = appliedMetadata }
         return ["applied": .int(applied.count)]
     }
 
@@ -71,6 +74,7 @@ final class DriverTests: XCTestCase {
 
     func testReportsAStateForTheStartAndEveryAppliedAction() {
         let driver = FakeDriver()
+        driver.stateMetadata.timestampUs = 123
         let (output, error) = session(driver, [
             #"{"type":"apply","action":{"Tap":{"id":"ok"}}}"#,
             #"{"type":"apply","action":"Back"}"#,
@@ -80,12 +84,84 @@ final class DriverTests: XCTestCase {
         XCTAssertNil(error)
         XCTAssertEqual(output, [
             #"{"name":"fake","protocol":0,"type":"hello"}"#,
-            #"{"state":{"applied":0},"type":"state"}"#,
-            #"{"state":{"applied":1},"type":"state"}"#,
-            #"{"state":{"applied":2},"type":"state"}"#,
+            #"{"settled":true,"state":{"applied":0},"timestamp_us":123,"type":"state"}"#,
+            #"{"settled":true,"state":{"applied":1},"timestamp_us":123,"type":"state"}"#,
+            #"{"settled":true,"state":{"applied":2},"timestamp_us":123,"type":"state"}"#,
         ])
         XCTAssertEqual(driver.applied, [["Tap": ["id": "ok"]], "Back"])
         XCTAssertTrue(driver.stopped)
+    }
+
+    func testEncodesMetadataOutsideTheState() throws {
+        let message = DriverMessage.state(["settled": "application data"], metadata: StateMetadata(
+            settled: false, notApplied: "missing element", timestampUs: 456))
+        let encoded = try JSONEncoder().encode(message)
+        let json = try JSONDecoder().decode(JSONValue.self, from: encoded)
+        XCTAssertEqual(json, [
+            "type": "state", "state": ["settled": "application data"],
+            "settled": false, "not_applied": "missing element", "timestamp_us": 456,
+        ])
+    }
+
+    func testStateMessageDefaultsAndAbsentOptionalMetadata() throws {
+        let encoded = try JSONEncoder().encode(DriverMessage.state(nil))
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: encoded), [
+            "type": "state", "state": nil, "settled": true,
+        ])
+    }
+
+    func testGeneratedTimestampNeverGoesBelowPreviousExplicitTimestamp() {
+        let driver = FakeDriver()
+        driver.stateMetadata.timestampUs = 9_000_000_000_000_000
+        driver.appliedMetadata = StateMetadata()
+        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        XCTAssertNil(error)
+        XCTAssertEqual(output.last,
+            #"{"settled":true,"state":{"applied":1},"timestamp_us":9000000000000000,"type":"state"}"#)
+    }
+
+    func testSessionForwardsActionMetadata() {
+        let driver = FakeDriver()
+        driver.stateMetadata.timestampUs = 123
+        driver.appliedMetadata = StateMetadata(settled: false, notApplied: "stale path", timestampUs: 124)
+        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        XCTAssertNil(error)
+        XCTAssertEqual(output.last,
+            #"{"not_applied":"stale path","settled":false,"state":{"applied":1},"timestamp_us":124,"type":"state"}"#)
+    }
+
+    func testRejectsNotAppliedOnInitialState() {
+        let driver = FakeDriver()
+        driver.stateMetadata.notApplied = "invalid initial outcome"
+        let (output, error) = session(driver, [])
+        XCTAssertNotNil(error)
+        XCTAssertEqual(output.count, 2) // hello and error, no invalid state
+        XCTAssertTrue(driver.stopped)
+    }
+
+    func testRejectsDecreasingExplicitTimestamp() {
+        let driver = FakeDriver()
+        driver.stateMetadata.timestampUs = 123
+        driver.appliedMetadata = StateMetadata(timestampUs: 122)
+        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        XCTAssertNotNil(error)
+        XCTAssertEqual(output.count, 3) // hello, initial state, error
+        XCTAssertTrue(driver.stopped)
+    }
+
+    func testDefaultTimestampsAreHostEpochMicrosecondsAndNondecreasing() throws {
+        let before = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        let (output, error) = session(FakeDriver(), [#"{"type":"apply","action":"Tap"}"#])
+        let after = UInt64(Date().timeIntervalSince1970 * 1_000_000)
+        XCTAssertNil(error)
+        let states = try output.dropFirst().map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any])
+        }
+        let timestamps = try states.map { try XCTUnwrap($0["timestamp_us"] as? UInt64) }
+        XCTAssertGreaterThanOrEqual(timestamps[0], before)
+        XCTAssertGreaterThanOrEqual(timestamps[1], timestamps[0])
+        XCTAssertLessThanOrEqual(timestamps[1], after)
+        XCTAssertTrue(states.allSatisfy { $0["not_applied"] == nil && ($0["settled"] as? Bool) == true })
     }
 
     func testReportsDriverErrorsToBombadilAndStopsTheApp() {

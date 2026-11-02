@@ -24,7 +24,7 @@ public struct MacAppConfiguration {
     /// How long to wait for the app to show a window or a menu bar extra.
     public var launchTimeout: TimeInterval = 30
     /// The state is settled once two reads `settleInterval` apart are
-    /// equal, or `settleTimeout` has passed.
+    /// equal and responsive. A timeout reports `settled: false`.
     public var settleTimeout: TimeInterval = 3
     public var settleInterval: TimeInterval = 0.15
     /// Bounds on the size of the reported tree.
@@ -74,12 +74,15 @@ public struct MacAppConfiguration {
 public final class MacAppDriver: BombadilDriver {
     public let name = "bombadil-macapp-driver"
     public var stallTimeoutMs: Int? { configuration.stallTimeoutMs }
+    public private(set) var stateMetadata = StateMetadata()
 
     let configuration: MacAppConfiguration
     var process: Process?
     var app: AXUIElement?
     var actionError: String?
     var screenshotDiagnostic: String?
+    /// After a mutating API is called, failures may have partially applied the action.
+    var actionAttempted = false
 
     /// The launched app's process ID, for signal handlers that need to
     /// stop it when the driver is killed.
@@ -92,6 +95,8 @@ public final class MacAppDriver: BombadilDriver {
     // MARK: Session
 
     public func start() throws -> JSONValue {
+        stateMetadata = StateMetadata()
+        actionError = nil
         try Self.requireAccessibility()
         // A menu that is open blocks AXPress on its status item until it
         // closes, so keep messages short and treat timeouts as success.
@@ -139,10 +144,14 @@ public final class MacAppDriver: BombadilDriver {
 
     public func apply(_ actionJSON: JSONValue) throws -> JSONValue {
         actionError = nil
+        actionAttempted = false
+        stateMetadata = StateMetadata()
         do {
+            guard process?.isRunning == true else { throw MacAppDriverError("the app is not running") }
             try perform(try MacAppAction(json: actionJSON))
         } catch {
             actionError = "\(error)"
+            if !actionAttempted { stateMetadata.notApplied = actionError }
             log("action \(actionJSON) failed: \(error)")
         }
         return settledState()
@@ -211,8 +220,13 @@ public final class MacAppDriver: BombadilDriver {
         return elements
     }
 
+    /// Set when a read timed out during `readState`, which then skips the
+    /// rest of the tree.
+    var unresponsive = false
+
     func readState() -> JSONValue {
         var budget = configuration.maxNodes
+        unresponsive = false
         var state: [String: JSONValue] = [
             "running": .bool(process?.isRunning ?? false),
             "pid": .int(Int(process?.processIdentifier ?? 0)),
@@ -222,7 +236,7 @@ public final class MacAppDriver: BombadilDriver {
             "menuBar": [],
         ]
         if process?.isRunning ?? false {
-            for root in roots() {
+            for root in roots() where !unresponsive {
                 state[root.name] = .array(root.elements.enumerated().map { index, element in
                     node(element, path: "\(root.name)/\(index)", depth: 0, budget: &budget)
                 })
@@ -234,13 +248,19 @@ public final class MacAppDriver: BombadilDriver {
 
     func settledState() -> JSONValue {
         var previous = readState()
+        var previousResponsive = !unresponsive
         let deadline = Date().addingTimeInterval(configuration.settleTimeout)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: configuration.settleInterval)
             let current = readState()
-            if current == previous { return current }
+            if current == previous && previousResponsive && !unresponsive {
+                stateMetadata.settled = true
+                return current
+            }
             previous = current
+            previousResponsive = !unresponsive
         }
+        stateMetadata.settled = false
         log("state didn't settle within \(configuration.settleTimeout)s")
         return previous
     }
@@ -255,8 +275,13 @@ public final class MacAppDriver: BombadilDriver {
     func node(_ element: AXUIElement, path: String, depth: Int, budget: inout Int) -> JSONValue {
         budget -= 1
         var values: CFArray?
-        AXUIElementCopyMultipleAttributeValues(
-            element, Self.nodeAttributes as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+        if !unresponsive,
+            AXUIElementCopyMultipleAttributeValues(
+                element, Self.nodeAttributes as CFArray, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+                == .cannotComplete
+        {
+            unresponsive = true
+        }
         let raw = (values as [AnyObject]?) ?? []
         func value(_ name: String) -> AnyObject? {
             guard let index = Self.nodeAttributes.firstIndex(of: name), index < raw.count else { return nil }
@@ -335,7 +360,9 @@ public final class MacAppDriver: BombadilDriver {
         case .press(let query):
             try press(try find(query))
         case .showMenu(let query):
-            try check(AXUIElementPerformAction(try find(query), kAXShowMenuAction as CFString), "AXShowMenu")
+            let element = try find(query)
+            actionAttempted = true
+            try check(AXUIElementPerformAction(element, kAXShowMenuAction as CFString), "AXShowMenu")
         case .openStatusItem(let index):
             let items = app.map(statusItemElements) ?? []
             guard items.indices.contains(index) else {
@@ -343,6 +370,7 @@ public final class MacAppDriver: BombadilDriver {
             }
             try press(items[index])
         case .typeText(let text, let query):
+            actionAttempted = true
             activate()
             if let query {
                 let element = try find(query)
@@ -363,6 +391,7 @@ public final class MacAppDriver: BombadilDriver {
             try postKey(code, flags: flags)
         case .escape:
             if let menu = openMenu() {
+                actionAttempted = true
                 try check(AXUIElementPerformAction(menu, kAXCancelAction as CFString), "AXCancel")
             } else {
                 try postKey(Self.keyCodes["escape"]!, flags: [])
@@ -390,6 +419,7 @@ public final class MacAppDriver: BombadilDriver {
         else {
             throw MacAppDriverError("the element has no press action, only \(actions)")
         }
+        actionAttempted = true
         try check(AXUIElementPerformAction(element, action as CFString), action)
     }
 
@@ -477,6 +507,7 @@ public final class MacAppDriver: BombadilDriver {
                     throw MacAppDriverError("can't create a keyboard event")
                 }
                 event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+                actionAttempted = true
                 event.postToPid(pid)
             }
             Thread.sleep(forTimeInterval: 0.01)
@@ -490,6 +521,7 @@ public final class MacAppDriver: BombadilDriver {
                 throw MacAppDriverError("can't create a keyboard event")
             }
             event.flags = flags
+            actionAttempted = true
             event.postToPid(pid)
         }
     }
@@ -587,7 +619,9 @@ public final class MacAppDriver: BombadilDriver {
 
     func attribute<T>(_ element: AXUIElement, _ name: String) -> T? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        let error = AXUIElementCopyAttributeValue(element, name as CFString, &value)
+        if error == .cannotComplete { unresponsive = true }
+        guard error == .success else { return nil }
         return value as? T
     }
 
