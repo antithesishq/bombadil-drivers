@@ -18,8 +18,10 @@ let usage = """
       --app-log PATH          write the app's stdout and stderr to PATH
       --launch-timeout-ms N   wait N ms for a window or menu bar extra (30000)
       --settle-timeout-ms N   wait at most N ms for the state to settle (3000)
+      --settle-interval-ms N  interval between tree reads (150)
       --stall-timeout-ms N    stall timeout announced to Bombadil (90000)
       --include-main-menu     report the app's main menu bar as `menuBar`
+      --profile               log capture and action timings to stderr
       --check-access          check (and prompt for) the Accessibility permission
     """
 
@@ -52,8 +54,10 @@ parsing: while let argument = arguments.popFirst() {
     case "--app-log": configuration.appLogPath = value(argument)
     case "--launch-timeout-ms": configuration.launchTimeout = Double(milliseconds(argument)) / 1000
     case "--settle-timeout-ms": configuration.settleTimeout = Double(milliseconds(argument)) / 1000
+    case "--settle-interval-ms": configuration.settleInterval = Double(milliseconds(argument)) / 1000
     case "--stall-timeout-ms": configuration.stallTimeoutMs = milliseconds(argument)
     case "--include-main-menu": configuration.includeMainMenu = true
+    case "--profile": configuration.profile = true
     case "--check-access": checkAccess = true
     case "-h", "--help":
         print(usage)
