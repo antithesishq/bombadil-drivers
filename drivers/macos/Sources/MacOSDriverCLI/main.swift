@@ -1,14 +1,14 @@
-// bombadil-macapp-driver: a Bombadil external driver for any macOS app,
+// bombadil-macos: a Bombadil external driver for any macOS app,
 // built on the Accessibility API. See `MacAppDriver` and the README.
 import Foundation
 #if os(macOS)
 import BombadilDriver
-import BombadilMacApp
+import BombadilMacOS
 #endif
 
 let usage = """
-    usage: bombadil-macapp-driver [options] -- <executable> [arguments...]
-           bombadil-macapp-driver --check-access
+    usage: bombadil-macos [options] -- <executable> [arguments...]
+           bombadil-macos --check-access
 
     Launches <executable> (an app's Contents/MacOS binary, or a wrapper that
     execs it) and drives it for Bombadil over stdin and stdout.
@@ -24,7 +24,7 @@ let usage = """
     """
 
 func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data("bombadil-macapp-driver: \(message)\n".utf8))
+    FileHandle.standardError.write(Data("bombadil-macos: \(message)\n".utf8))
     exit(2)
 }
 
@@ -93,7 +93,7 @@ for signalNumber in [SIGTERM, SIGINT, SIGHUP] {
 do {
     try runDriver(MacAppDriver(configuration))
 } catch {
-    FileHandle.standardError.write(Data("bombadil-macapp-driver: \(error)\n".utf8))
+    FileHandle.standardError.write(Data("bombadil-macos: \(error)\n".utf8))
     exit(1)
 }
 #else

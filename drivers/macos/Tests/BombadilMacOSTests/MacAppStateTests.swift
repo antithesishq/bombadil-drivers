@@ -2,7 +2,7 @@
 import BombadilDriver
 import XCTest
 
-@testable import BombadilMacApp
+@testable import BombadilMacOS
 
 final class MacAppStateTests: XCTestCase {
     func testTimeoutDoesNotClaimSettled() {
