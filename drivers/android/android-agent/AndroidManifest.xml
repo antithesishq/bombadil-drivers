@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- package.sh renames the package to <target>.bombadil and the
+     instrumentation's target to the app under test. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="me.uzaaft.bombadil.agent">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+    <instrumentation
+        android:name="me.uzaaft.bombadil.agent.Agent"
+        android:targetPackage="me.uzaaft.bombadil.target" />
+</manifest>

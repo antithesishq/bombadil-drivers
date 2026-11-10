@@ -1,0 +1,13 @@
+// Gradle init script for building Now in Android's benchmarkRelease
+// variant (R8-minified, not debuggable, signed with the debug key) so that
+// the in-process agent can run in it: adds agent-keep.pro to its R8 rules.
+// Used by setup.sh; it leaves the nowinandroid checkout untouched.
+def rules = new File(buildscript.sourceFile.parentFile, 'agent-keep.pro')
+gradle.lifecycle.beforeProject { project ->
+    project.pluginManager.withPlugin('com.android.application') {
+        def components = project.extensions.getByName('androidComponents')
+        components.onVariants(components.selector().withBuildType('benchmarkRelease')) { variant ->
+            variant.proguardFiles.add(project.layout.projectDirectory.file(rules.absolutePath))
+        }
+    }
+}

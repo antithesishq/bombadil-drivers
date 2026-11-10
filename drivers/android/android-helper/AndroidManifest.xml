@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="me.uzaaft.bombadil.helper"
+    android:versionCode="1"
+    android:versionName="1">
+
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="35" />
+
+    <!-- To tell activities from other windows in other apps' events. -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+
+    <application android:label="Bombadil helper" android:hasCode="true" />
+
+    <instrumentation
+        android:name=".Helper"
+        android:targetPackage="me.uzaaft.bombadil.helper" />
+</manifest>
