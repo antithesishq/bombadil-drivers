@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The driver Bombadil runs for each test run: the adb driver for Now in
 # Android, on the first running emulator that no other driver is using.
-# Run setup.sh first, and Bombadil inside `nix develop`.
+# Run setup.sh first, and Bombadil inside `nix develop ../..#android`
+# from drivers/android.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)

@@ -4,7 +4,8 @@
 # entrypoint's kernel, and links what driver.sh needs into
 # examples/compass_app/out/.
 #
-# Run it inside the dev shell: nix develop -c examples/compass_app/setup.sh
+# From drivers/flutter:
+#   nix develop ../..#flutter -c examples/compass_app/setup.sh
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)

@@ -10,6 +10,11 @@ optional instrumentation for input, state extraction, and settling.
 | [Android](drivers/android/) | ADB / UiAutomation, with an optional in-process Compose agent | Kotlin / Gradle / Android SDK |
 | [SwiftUI and macOS](drivers/swiftui/) | Swift RPC library and an external macOS Accessibility driver | Swift / macOS |
 
+From the repository root, enter a shell with `nix develop .#flutter`,
+`nix develop .#android`, or `nix develop .#swiftui`. Run project commands from
+the corresponding `drivers/` directory. Direnv selects the shell automatically
+when entering a driver directory.
+
 ## License
 
 All drivers in this repository are available under the [MIT license](LICENCE).

@@ -2,7 +2,8 @@
 # Gets everything ready for testing Now in Android with Bombadil:
 # clones and pins the app, builds its APK (NIA_VARIANT, see env.sh), builds
 # the driver, and boots EMULATORS headless emulators (default 1), reusing
-# any that are already running. Idempotent. Run it inside `nix develop`.
+# any that are already running. Idempotent. From drivers/android, run inside
+# `nix develop ../..#android`.
 #
 #   examples/nowinandroid/setup.sh          # one emulator
 #   EMULATORS=3 examples/nowinandroid/setup.sh
