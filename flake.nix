@@ -26,6 +26,7 @@
           android = import ./nix/android.nix { inherit nixpkgs system; };
           inherit swift;
           macos = swift;
+          ios = swift;
         }
       );
 

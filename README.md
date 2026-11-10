@@ -13,9 +13,10 @@ underneath them.
 | [Flutter](drivers/flutter/) | Instrumented Flutter semantics and headless execution | Flutter / Dart |
 | [Android](drivers/android/) | ADB / UiAutomation, with an optional in-process Compose agent | Kotlin / Gradle / Android SDK |
 | [macOS](drivers/macos/) | Black-box Accessibility driver for macOS apps | Swift / macOS |
+| [iOS](drivers/ios/) | Black-box XCTest automation through a separate WebDriverAgent runner | Swift / Xcode |
 
 From the repository root, enter a shell with `nix develop .#flutter`,
-`nix develop .#android`, or `nix develop .#macos`. Run project commands from
+`nix develop .#android`, `nix develop .#macos`, or `nix develop .#ios`. Run project commands from
 the corresponding `drivers/` directory. Direnv selects the shell automatically
 when entering a driver directory.
 
