@@ -8,7 +8,8 @@ Requires Xcode, a logged-in GUI session, and Accessibility permission.
 Screenshots also need macOS 14+ and Screen Recording permission.
 Build with `/usr/bin/swift build -c release`, then run
 `.build/release/bombadil-macos -- <app executable> [arguments...]`.
-Protocol messages alone go to stdout; logs go to stderr.
+Use `--profile` to log tree-read, settling, action, and screenshot timings
+to stderr. Protocol messages alone go to stdout.
 
 See the [action model](Sources/BombadilMacOS/MacAppAction.swift) and
 [GUI session launcher](scripts/run-in-gui-session.sh). The default settling

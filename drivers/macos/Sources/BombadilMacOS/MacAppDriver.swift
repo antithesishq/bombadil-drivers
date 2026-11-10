@@ -32,6 +32,8 @@ public struct MacAppConfiguration {
     public var maxDepth = 40
     /// Report the app's main menu bar (`menuBar`) too.
     public var includeMainMenu = false
+    /// Log phase timings to stderr without adding volatile values to the state.
+    public var profile = false
     /// Announced to Bombadil; launching and settling can take a while.
     public var stallTimeoutMs = 90_000
 
@@ -143,6 +145,8 @@ public final class MacAppDriver: BombadilDriver {
     }
 
     public func apply(_ actionJSON: JSONValue) throws -> JSONValue {
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { profile("apply", since: started) }
         actionError = nil
         actionAttempted = false
         stateMetadata = StateMetadata()
@@ -225,7 +229,9 @@ public final class MacAppDriver: BombadilDriver {
     var unresponsive = false
 
     func readState() -> JSONValue {
+        let started = DispatchTime.now().uptimeNanoseconds
         var budget = configuration.maxNodes
+        defer { profile("tree", since: started, details: "nodes=\(configuration.maxNodes - budget) responsive=\(!unresponsive)") }
         unresponsive = false
         var state: [String: JSONValue] = [
             "running": .bool(process?.isRunning ?? false),
@@ -247,12 +253,16 @@ public final class MacAppDriver: BombadilDriver {
     }
 
     func settledState() -> JSONValue {
+        let started = DispatchTime.now().uptimeNanoseconds
+        var reads = 1
+        defer { profile("settle", since: started, details: "reads=\(reads) settled=\(stateMetadata.settled)") }
         var previous = readState()
         var previousResponsive = !unresponsive
         let deadline = Date().addingTimeInterval(configuration.settleTimeout)
         while Date() < deadline {
             Thread.sleep(forTimeInterval: configuration.settleInterval)
             let current = readState()
+            reads += 1
             if current == previous && previousResponsive && !unresponsive {
                 stateMetadata.settled = true
                 return current
@@ -467,9 +477,25 @@ public final class MacAppDriver: BombadilDriver {
     }
 
     func matches(_ element: AXUIElement, _ query: ElementQuery) -> Bool {
-        query.matches(
-            role: attribute(element, kAXRoleAttribute), title: attribute(element, kAXTitleAttribute),
-            identifier: attribute(element, kAXIdentifierAttribute))
+        // AX reads cross the process boundary. Request only selector fields,
+        // in one message, rather than three separate reads for every candidate.
+        let attributes = [
+            (kAXRoleAttribute as String, query.role),
+            (kAXTitleAttribute as String, query.title),
+            (kAXIdentifierAttribute as String, query.identifier),
+        ].compactMap { name, expected in expected.map { (name, $0) } }
+        guard !attributes.isEmpty else { return true }
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            element, attributes.map { $0.0 } as CFArray,
+            AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+        if error == .cannotComplete { unresponsive = true }
+        guard error == .success, let raw = values as? [AnyObject], raw.count == attributes.count else {
+            return false
+        }
+        return zip(raw, attributes).allSatisfy { value, attribute in
+            (value as? String) == attribute.1
+        }
     }
 
     /// The first open menu, if any.
@@ -542,6 +568,8 @@ public final class MacAppDriver: BombadilDriver {
     /// Capture only the frontmost visible window owned by the launched
     /// process, never a desktop crop (which could expose other apps).
     public func screenshotPNG() -> Data? {
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer { profile("screenshot", since: started) }
         func omitted(_ reason: String) -> Data? {
             if screenshotDiagnostic != reason {
                 log("screenshot_png omitted: \(reason)")
@@ -643,6 +671,12 @@ public final class MacAppDriver: BombadilDriver {
 
     func log(_ message: String) {
         FileHandle.standardError.write(Data("[\(name)] \(message)\n".utf8))
+    }
+
+    func profile(_ phase: String, since started: UInt64, details: String = "") {
+        guard configuration.profile else { return }
+        let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+        log("profile phase=\(phase) duration_ms=\(milliseconds) \(details)")
     }
 }
 #endif
