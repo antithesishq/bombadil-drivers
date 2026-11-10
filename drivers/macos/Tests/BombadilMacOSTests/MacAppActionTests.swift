@@ -1,7 +1,7 @@
 import BombadilDriver
 import XCTest
 
-@testable import BombadilMacApp
+@testable import BombadilMacOS
 
 final class MacAppActionTests: XCTestCase {
     func testParsesActionsFromTheirJSON() throws {

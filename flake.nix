@@ -19,11 +19,13 @@
         system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
+          swift = import ./nix/swift.nix { inherit pkgs; };
         in
         {
           flutter = (import ./nix/flutter.nix { inherit pkgs; }).shell;
           android = import ./nix/android.nix { inherit nixpkgs system; };
-          swiftui = import ./nix/swiftui.nix { inherit pkgs; };
+          inherit swift;
+          macos = swift;
         }
       );
 

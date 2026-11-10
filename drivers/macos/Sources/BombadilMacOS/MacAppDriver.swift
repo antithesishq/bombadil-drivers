@@ -72,7 +72,7 @@ public struct MacAppConfiguration {
 /// session, so run this driver from a terminal in the GUI session or as a
 /// LaunchAgent (see `scripts/run-in-gui-session.sh`).
 public final class MacAppDriver: BombadilDriver {
-    public let name = "bombadil-macapp-driver"
+    public let name = "bombadil-macos"
     public var stallTimeoutMs: Int? { configuration.stallTimeoutMs }
     public private(set) var stateMetadata = StateMetadata()
 
