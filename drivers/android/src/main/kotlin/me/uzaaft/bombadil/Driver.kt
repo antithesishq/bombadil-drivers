@@ -66,7 +66,7 @@ interface BombadilDriver {
 
 /** Messages Bombadil sends to the driver. */
 sealed interface BombadilMessage {
-    data class Apply(val action: JsonElement) : BombadilMessage
+    data class ApplyAction(val action: JsonElement) : BombadilMessage
 
     data object Terminate : BombadilMessage
 
@@ -74,7 +74,7 @@ sealed interface BombadilMessage {
         fun parse(line: String): BombadilMessage {
             val message = Json.parseToJsonElement(line).jsonObject
             return when (val type = message["type"]?.jsonPrimitive?.content) {
-                "apply" -> Apply(message["action"] ?: error("`apply` without `action`"))
+                "apply_action" -> ApplyAction(message["action"] ?: error("`apply_action` without `action`"))
                 "terminate" -> Terminate
                 else -> error("unknown message type `$type`")
             }
@@ -134,14 +134,14 @@ fun runDriver(
                 driver.cancel()
             }
             messages.put(message)
-            if (message.getOrNull() !is BombadilMessage.Apply) break
+            if (message.getOrNull() !is BombadilMessage.ApplyAction) break
         }
     }
     try {
         state(driver.start(), initial = true)
         while (true) {
             when (val message = messages.take().getOrThrow()) {
-                is BombadilMessage.Apply -> state(driver.apply(message.action))
+                is BombadilMessage.ApplyAction -> state(driver.apply(message.action))
                 BombadilMessage.Terminate, null -> return
             }
         }

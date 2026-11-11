@@ -46,7 +46,7 @@ class DriverTest {
             override fun screenshotPng() = byteArrayOf(137.toByte(), 80, fake.applied.size.toByte(), 255.toByte())
         }
         val output = mutableListOf<String>()
-        session(driver, listOf("""{"type":"apply","action":"Back"}"""), output)
+        session(driver, listOf("""{"type":"apply_action","action":"Back"}"""), output)
         val states = output.drop(1).map { Json.parseToJsonElement(it).jsonObject }
         assertEquals(listOf("iVAA/w==", "iVAB/w=="), states.map { it["screenshot_png"]!!.jsonPrimitive.content })
         assertEquals(Json.parseToJsonElement("""{"applied":1}"""), states.last()["state"])
@@ -59,10 +59,10 @@ class DriverTest {
         session(
             driver,
             listOf(
-                """{"type":"apply","action":{"Tap":{"id":"ok"}}}""",
-                """{"type":"apply","action":"Back"}""",
+                """{"type":"apply_action","action":{"Tap":{"id":"ok"}}}""",
+                """{"type":"apply_action","action":"Back"}""",
                 """{"type":"terminate"}""",
-                """{"type":"apply","action":"AfterTerminate"}""",
+                """{"type":"apply_action","action":"AfterTerminate"}""",
             ),
             output,
         )
@@ -79,6 +79,19 @@ class DriverTest {
             listOf(Json.parseToJsonElement("""{"Tap":{"id":"ok"}}"""), JsonPrimitive("Back")),
             driver.applied,
         )
+        assertTrue(driver.stopped)
+    }
+
+    @Test
+    fun rejectsLegacyApplyWithoutPerformingTheAction() {
+        val driver = FakeDriver()
+        val output = mutableListOf<String>()
+        val error = assertFailsWith<IllegalStateException> {
+            session(driver, listOf("""{"type":"apply","action":"Back"}"""), output)
+        }
+        assertEquals("unknown message type `apply`", error.message)
+        assertTrue(driver.applied.isEmpty())
+        assertEquals(listOf("hello", "state", "error"), output.map { Json.parseToJsonElement(it).jsonObject["type"]!!.jsonPrimitive.content })
         assertTrue(driver.stopped)
     }
 
@@ -109,7 +122,7 @@ class DriverTest {
             override fun cancel() = cancelled.countDown()
         }
         val output = mutableListOf<String>()
-        session(driver, listOf("""{"type":"apply","action":"Slow"}""", """{"type":"terminate"}"""), output)
+        session(driver, listOf("""{"type":"apply_action","action":"Slow"}""", """{"type":"terminate"}"""), output)
         // The aborted action is no error: Bombadil asked to stop.
         assertEquals(listOf("hello", "state"), output.map { Json.parseToJsonElement(it).jsonObject["type"]!!.jsonPrimitive.content })
         assertTrue(fake.stopped)
@@ -120,7 +133,7 @@ class DriverTest {
         val driver = FakeDriver()
         val output = mutableListOf<String>()
         assertFailsWith<IllegalStateException> {
-            session(driver, listOf("""{"type":"apply","action":"Crash"}"""), output)
+            session(driver, listOf("""{"type":"apply_action","action":"Crash"}"""), output)
         }
         val last = Json.parseToJsonElement(output.last()).jsonObject
         assertEquals("error", last["type"]!!.jsonPrimitive.content)
@@ -136,7 +149,7 @@ class DriverTest {
             override fun apply(action: JsonElement) = StateResult(appState, false, "no matching node", 100)
         }
         val output = mutableListOf<String>()
-        session(driver, listOf("""{"type":"apply","action":"Back"}"""), output)
+        session(driver, listOf("""{"type":"apply_action","action":"Back"}"""), output)
         val states = output.drop(1).map { Json.parseToJsonElement(it).jsonObject }
         assertEquals(listOf(123L, 123L), states.map { it.getValue("timestamp_us").jsonPrimitive.long })
         assertEquals(listOf(true, false), states.map { it.getValue("settled").jsonPrimitive.boolean })
