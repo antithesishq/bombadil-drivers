@@ -34,11 +34,12 @@ public final class IOSDriver: BombadilDriver {
     public var stallTimeoutMs: Int? { configuration.stallTimeoutMs }
     public private(set) var stateMetadata = StateMetadata(settled: false)
 
-    let configuration: IOSConfiguration
-    let session: URLSession
-    var sessionID: String?
-    var actionAttempted = false
-    var actionError: String?
+    private let configuration: IOSConfiguration
+    private let session: URLSession
+    private let sourceQuery: [URLQueryItem]
+    private var sessionID: String?
+    private var actionAttempted = false
+    private var actionError: String?
 
     private enum Failure: Error, CustomStringConvertible {
         case rejected(String)
@@ -65,6 +66,11 @@ public final class IOSDriver: BombadilDriver {
     public init(_ configuration: IOSConfiguration, session: URLSession = .shared) {
         self.configuration = configuration
         self.session = session
+        var query = [URLQueryItem(name: "format", value: "json")]
+        if !configuration.excludedAttributes.isEmpty {
+            query.append(URLQueryItem(name: "excluded_attributes", value: configuration.excludedAttributes.joined(separator: ",")))
+        }
+        sourceQuery = query
     }
 
     public func start() throws -> JSONValue {
@@ -100,15 +106,14 @@ public final class IOSDriver: BombadilDriver {
         stateMetadata = StateMetadata(settled: false)
         do {
             try perform(action)
-        } catch let error as Failure {
-            guard case .rejected = error else { throw error }
-            actionError = error.description
-        } catch let error as WebDriverError {
+        } catch Failure.rejected(let message) {
+            actionError = message
+        } catch let error as WebDriverError
+            where ["no such element", "stale element reference", "element not interactable",
+                   "invalid element state", "invalid argument", "unknown error"].contains(error.code)
+        {
             // These are action failures. Transport errors, malformed replies,
             // and lost sessions are fatal; never retry an uncertain action.
-            guard ["no such element", "stale element reference", "element not interactable",
-                   "invalid element state", "invalid argument", "unknown error"].contains(error.code)
-            else { throw error }
             actionError = error.description
         }
         if !actionAttempted { stateMetadata.notApplied = actionError }
@@ -149,7 +154,7 @@ public final class IOSDriver: BombadilDriver {
             let current = try readTree()
             reads += 1
             if current == tree {
-                stateMetadata.settled = true
+                stateMetadata.settled = ContinuousClock.now < deadline
                 break
             }
             tree = current
@@ -158,11 +163,7 @@ public final class IOSDriver: BombadilDriver {
     }
 
     private func readTree() throws -> JSONValue {
-        var query = [URLQueryItem(name: "format", value: "json")]
-        if !configuration.excludedAttributes.isEmpty {
-            query.append(URLQueryItem(name: "excluded_attributes", value: configuration.excludedAttributes.joined(separator: ",")))
-        }
-        let tree = try request("GET", route("source"), query: query)
+        let tree = try request("GET", route("source"), query: sourceQuery)
         guard case .object = tree else { throw Failure.backend("WebDriverAgent returned no JSON hierarchy") }
         return tree
     }
@@ -221,19 +222,21 @@ public final class IOSDriver: BombadilDriver {
     }
 
     private func find(_ fields: [String: JSONValue]) throws -> String {
-        var predicates: [String] = []
-        for key in ["name", "label", "type"] where fields[key] != nil {
-            guard case .string(let value)? = fields[key] else { throw Failure.rejected("\(key) must be a string") }
-            let literal = key == "type" ? "XCUIElementType\(value)" : value
-            let quoted = String(decoding: try JSONEncoder().encode(literal), as: UTF8.self)
-            predicates.append("\(key) == \(quoted)")
-        }
-        guard !predicates.isEmpty else { throw Failure.rejected("an element selector requires name, label, or type") }
-        var locator: JSONValue = ["using": "predicate string", "value": .string(predicates.joined(separator: " AND "))]
-        if predicates.count == 1, case .string(let name)? = fields["name"] {
+        let locator: JSONValue
+        if case .string(let name)? = fields["name"], fields["label"] == nil, fields["type"] == nil {
             // WDA's native name query avoids its per-snapshot predicate callback.
             // Keep the plural endpoint so ambiguous selectors still fail.
             locator = ["using": "accessibility id", "value": .string(name)]
+        } else {
+            var predicates: [String] = []
+            for key in ["name", "label", "type"] where fields[key] != nil {
+                guard case .string(let value)? = fields[key] else { throw Failure.rejected("\(key) must be a string") }
+                let literal = key == "type" ? "XCUIElementType\(value)" : value
+                let quoted = String(decoding: try JSONEncoder().encode(literal), as: UTF8.self)
+                predicates.append("\(key) == \(quoted)")
+            }
+            guard !predicates.isEmpty else { throw Failure.rejected("an element selector requires name, label, or type") }
+            locator = ["using": "predicate string", "value": .string(predicates.joined(separator: " AND "))]
         }
         let response = try request("POST", route("elements"), body: locator)
         guard case .array(let matches) = response else { throw Failure.backend("WebDriverAgent returned no element list") }

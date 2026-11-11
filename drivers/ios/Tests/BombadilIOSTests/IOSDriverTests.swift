@@ -70,6 +70,32 @@ final class IOSDriverTests: XCTestCase {
             "actionError": .null,
         ])
     }
+
+    func testLateSnapshotDoesNotClaimSettled() throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WebDriverProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel(); WebDriverProtocol.respond = nil }
+        var snapshots = 0
+        WebDriverProtocol.respond = { request in
+            switch (request.httpMethod, request.url!.path) {
+            case ("POST", "/session"): return (200, ["sessionId": "test"])
+            case ("POST", "/session/test/appium/settings"), ("DELETE", "/session/test"): return (200, .null)
+            case ("GET", "/session/test/source"):
+                snapshots += 1
+                if snapshots > 1 { Thread.sleep(forTimeInterval: 0.3) }
+                return (200, ["type": "Application"])
+            default: throw URLError(.badURL)
+            }
+        }
+        var options = IOSConfiguration(serverURL: URL(string: "http://wda.test")!, bundleIdentifier: "example.app")
+        options.settleTimeout = 0.2
+        options.settleInterval = 0.001
+        let driver = IOSDriver(options, session: session)
+        defer { driver.stop() }
+        XCTAssertEqual(try driver.start(), ["tree": ["type": "Application"], "actionError": .null])
+        XCTAssertFalse(driver.stateMetadata.settled)
+    }
 }
 
 private final class WebDriverProtocol: URLProtocol {

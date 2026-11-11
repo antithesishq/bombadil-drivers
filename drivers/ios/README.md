@@ -6,6 +6,12 @@ XCUITest runner. The target app needs no Bombadil, SwiftUI, or React Native
 instrumentation. The runner needs Xcode and a simulator, or a provisioned
 device; the Bombadil bridge can connect over HTTP from another machine.
 
+Support targets iOS releases receiving regular [Apple security updates](https://support.apple.com/en-us/100100);
+older releases are best-effort. Use a WDA/Xcode combination compatible with
+the target OS and device. The bridge's macOS deployment target applies only
+to its host, not to the iOS device. Compatibility with an OS release does not
+mean that release has been tested.
+
 Use a dedicated runner/device: creating a session restarts the installed
 target app and replaces any existing WDA session. Build with `swift build
 -c release`, then run `.build/release/bombadil-ios --bundle-id com.example.app

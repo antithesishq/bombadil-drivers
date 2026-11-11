@@ -445,6 +445,26 @@ public final class MacAppDriver: BombadilDriver {
     /// The element `query` picks out of the current tree.
     func find(_ query: ElementQuery) throws -> AXUIElement {
         let roots = roots()
+        // Prepare the batched selector once, not for every visited node.
+        let attributes = [
+            (kAXRoleAttribute as String, query.role),
+            (kAXTitleAttribute as String, query.title),
+            (kAXIdentifierAttribute as String, query.identifier),
+        ].compactMap { name, expected in expected.map { (name, $0) } }
+        let names = attributes.map { $0.0 } as CFArray
+        func matches(_ element: AXUIElement) -> Bool {
+            guard !attributes.isEmpty else { return true }
+            var values: CFArray?
+            let error = AXUIElementCopyMultipleAttributeValues(
+                element, names, AXCopyMultipleAttributeOptions(rawValue: 0), &values)
+            if error == .cannotComplete { unresponsive = true }
+            guard error == .success, let raw = values as? [AnyObject], raw.count == attributes.count else {
+                return false
+            }
+            return zip(raw, attributes).allSatisfy { value, attribute in
+                (value as? String) == attribute.1
+            }
+        }
         if let path = query.path {
             guard let (rootName, indices) = parseElementPath(path),
                 let root = roots.first(where: { $0.name == rootName })
@@ -455,13 +475,13 @@ public final class MacAppDriver: BombadilDriver {
                 let children = children(parent)
                 element = children.indices.contains(index) ? children[index] : nil
             }
-            if let element, matches(element, query) { return element }
+            if let element, matches(element) { return element }
             guard query.hasAttributes else { throw MacAppDriverError("no element at `\(path)`") }
         }
         var budget = configuration.maxNodes
         func search(_ element: AXUIElement, depth: Int) -> AXUIElement? {
             budget -= 1
-            if matches(element, query) { return element }
+            if matches(element) { return element }
             guard depth < configuration.maxDepth else { return nil }
             for child in children(element) where budget > 0 {
                 if let found = search(child, depth: depth + 1) { return found }
@@ -474,28 +494,6 @@ public final class MacAppDriver: BombadilDriver {
             }
         }
         throw MacAppDriverError("no element matches \(query)")
-    }
-
-    func matches(_ element: AXUIElement, _ query: ElementQuery) -> Bool {
-        // AX reads cross the process boundary. Request only selector fields,
-        // in one message, rather than three separate reads for every candidate.
-        let attributes = [
-            (kAXRoleAttribute as String, query.role),
-            (kAXTitleAttribute as String, query.title),
-            (kAXIdentifierAttribute as String, query.identifier),
-        ].compactMap { name, expected in expected.map { (name, $0) } }
-        guard !attributes.isEmpty else { return true }
-        var values: CFArray?
-        let error = AXUIElementCopyMultipleAttributeValues(
-            element, attributes.map { $0.0 } as CFArray,
-            AXCopyMultipleAttributeOptions(rawValue: 0), &values)
-        if error == .cannotComplete { unresponsive = true }
-        guard error == .success, let raw = values as? [AnyObject], raw.count == attributes.count else {
-            return false
-        }
-        return zip(raw, attributes).allSatisfy { value, attribute in
-            (value as? String) == attribute.1
-        }
     }
 
     /// The first open menu, if any.
