@@ -1,0 +1,9 @@
+[
+  {
+    "scope": {
+      "identifier": "fixture",
+      "module": { "field": "TARGET", "value": "storage" }
+    },
+    "level": "warning"
+  }
+]
