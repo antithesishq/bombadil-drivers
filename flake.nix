@@ -28,10 +28,22 @@
           macos = swift;
           ios = swift;
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux = (import ./nix/linux.nix { inherit pkgs; }).shell;
+        }
       );
 
-      packages = forAllSystems (system: {
-        fonts = (import ./nix/flutter.nix { pkgs = nixpkgs.legacyPackages.${system}; }).fonts;
-      });
+      packages = forAllSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          fonts = (import ./nix/flutter.nix { inherit pkgs; }).fonts;
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          linux = (import ./nix/linux.nix { inherit pkgs; }).package;
+        }
+      );
     };
 }
