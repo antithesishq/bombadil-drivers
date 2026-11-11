@@ -107,8 +107,8 @@ sealed class BombadilMessage {
   factory BombadilMessage.fromJson(Object? json) {
     if (json is Map<String, Object?>) {
       switch (json['type']) {
-        case 'apply':
-          return Apply(json['action']);
+        case 'apply_action':
+          return ApplyAction(json['action']);
         case 'terminate':
           return const Terminate();
       }
@@ -117,8 +117,8 @@ sealed class BombadilMessage {
   }
 }
 
-class Apply extends BombadilMessage {
-  const Apply(this.action);
+class ApplyAction extends BombadilMessage {
+  const ApplyAction(this.action);
 
   /// A concrete action, in the shape the specification chose.
   final Object? action;

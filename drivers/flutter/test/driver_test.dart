@@ -66,7 +66,7 @@ void main() {
     () async {
       final driver = FakeDriver()..capture = true;
       final (sent, error) = await session(driver, [
-        '{"type":"apply","action":"Back"}',
+        '{"type":"apply_action","action":"Back"}',
         '{"type":"terminate"}',
       ]);
       expect(error, isNull);
@@ -91,10 +91,10 @@ void main() {
   test('reports a state for the start and for every applied action', () async {
     final driver = FakeDriver();
     final (sent, error) = await session(driver, [
-      '{"type":"apply","action":{"Tap":{"id":"ok"}}}',
-      '{"type":"apply","action":"Back"}',
+      '{"type":"apply_action","action":{"Tap":{"id":"ok"}}}',
+      '{"type":"apply_action","action":"Back"}',
       '{"type":"terminate"}',
-      '{"type":"apply","action":"AfterTerminate"}',
+      '{"type":"apply_action","action":"AfterTerminate"}',
     ]);
     final timestamps = sent
         .skip(1)
@@ -130,6 +130,19 @@ void main() {
       'Back',
     ]);
     expect(error, isNull);
+    expect(driver.stopped, isTrue);
+  });
+
+  test('rejects the obsolete apply request without applying it', () async {
+    final driver = FakeDriver();
+    final (sent, error) = await session(driver, [
+      '{"type":"apply","action":"Back"}',
+    ]);
+    expect(error, isFormatException);
+    expect(sent, hasLength(3));
+    expect((sent.last as Map)['type'], 'error');
+    expect((sent.last as Map)['message'], contains('invalid message'));
+    expect(driver.applied, isEmpty);
     expect(driver.stopped, isTrue);
   });
 
@@ -178,7 +191,7 @@ void main() {
         timestampUs: 1700000000000001,
       );
     final (sent, error) = await session(driver, [
-      '{"type":"apply","action":"Back"}',
+      '{"type":"apply_action","action":"Back"}',
     ]);
     expect(error, isNull);
     expect(sent[1], {
@@ -214,7 +227,7 @@ void main() {
   test('reports driver errors to Bombadil and stops the app', () async {
     final driver = FakeDriver();
     final (sent, error) = await session(driver, [
-      '{"type":"apply","action":"Crash"}',
+      '{"type":"apply_action","action":"Crash"}',
     ]);
     expect(error, isStateError);
     expect(sent.last, {'type': 'error', 'message': 'Bad state: crashed'});

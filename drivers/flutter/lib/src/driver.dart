@@ -72,7 +72,7 @@ Future<void> runDriver(
     await sendState(initial);
     await for (final line in lines) {
       switch (BombadilMessage.fromJson(jsonDecode(line))) {
-        case Apply(:final action):
+        case ApplyAction(:final action):
           final state = await driver.apply(action);
           await sendState(state);
         case Terminate():
