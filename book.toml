@@ -1,0 +1,7 @@
+[book]
+title = "Bombadil drivers"
+language = "en"
+src = "docs"
+
+[output.html]
+git-repository-url = "https://github.com/antithesishq/bombadil-drivers"

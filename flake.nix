@@ -24,6 +24,7 @@
         {
           flutter = (import ./nix/flutter.nix { inherit pkgs; }).shell;
           android = import ./nix/android.nix { inherit nixpkgs system; };
+          docs = import ./nix/docs.nix { inherit pkgs; };
           inherit swift;
           macos = swift;
           ios = swift;
