@@ -4,6 +4,11 @@ Black-box driver for macOS applications, using Accessibility for state and
 input, and ScreenCaptureKit for optional window screenshots. The target app
 does not link Bombadil or need to use SwiftUI.
 
+Support targets macOS releases receiving regular Apple security updates;
+older releases are best-effort. Follow [Apple's security releases](https://support.apple.com/en-us/100100)
+rather than a fixed latest-OS requirement. A deployment target is a technical
+minimum, not a guarantee that every later OS version has been tested.
+
 Requires Xcode, a logged-in GUI session, and Accessibility permission.
 Screenshots also need macOS 14+ and Screen Recording permission.
 Build with `/usr/bin/swift build -c release`, then run
