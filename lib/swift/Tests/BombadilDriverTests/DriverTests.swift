@@ -49,8 +49,8 @@ final class DriverTests: XCTestCase {
         driver.screenshots = [png, nil, png]
         var output: [String] = []
         var input = [
-            #"{"type":"apply","action":"First"}"#,
-            #"{"type":"apply","action":"Second"}"#,
+            #"{"type":"apply_action","action":"First"}"#,
+            #"{"type":"apply_action","action":"Second"}"#,
             #"{"type":"terminate"}"#,
         ].makeIterator()
         var reads = 0
@@ -76,10 +76,10 @@ final class DriverTests: XCTestCase {
         let driver = FakeDriver()
         driver.stateMetadata.timestampUs = 123
         let (output, error) = session(driver, [
-            #"{"type":"apply","action":{"Tap":{"id":"ok"}}}"#,
-            #"{"type":"apply","action":"Back"}"#,
+            #"{"type":"apply_action","action":{"Tap":{"id":"ok"}}}"#,
+            #"{"type":"apply_action","action":"Back"}"#,
             #"{"type":"terminate"}"#,
-            #"{"type":"apply","action":"AfterTerminate"}"#,
+            #"{"type":"apply_action","action":"AfterTerminate"}"#,
         ])
         XCTAssertNil(error)
         XCTAssertEqual(output, [
@@ -89,6 +89,17 @@ final class DriverTests: XCTestCase {
             #"{"settled":true,"state":{"applied":2},"timestamp_us":123,"type":"state"}"#,
         ])
         XCTAssertEqual(driver.applied, [["Tap": ["id": "ok"]], "Back"])
+        XCTAssertTrue(driver.stopped)
+    }
+
+    func testRejectsLegacyApplyWithoutApplyingTheAction() throws {
+        let driver = FakeDriver()
+        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        XCTAssertNotNil(error)
+        let message = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: Data(try XCTUnwrap(output.last).utf8)) as? [String: Any])
+        XCTAssertEqual(message["type"] as? String, "error")
+        XCTAssertTrue(driver.applied.isEmpty)
         XCTAssertTrue(driver.stopped)
     }
 
@@ -114,7 +125,7 @@ final class DriverTests: XCTestCase {
         let driver = FakeDriver()
         driver.stateMetadata.timestampUs = 9_000_000_000_000_000
         driver.appliedMetadata = StateMetadata()
-        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        let (output, error) = session(driver, [#"{"type":"apply_action","action":"Tap"}"#])
         XCTAssertNil(error)
         XCTAssertEqual(output.last,
             #"{"settled":true,"state":{"applied":1},"timestamp_us":9000000000000000,"type":"state"}"#)
@@ -124,7 +135,7 @@ final class DriverTests: XCTestCase {
         let driver = FakeDriver()
         driver.stateMetadata.timestampUs = 123
         driver.appliedMetadata = StateMetadata(settled: false, notApplied: "stale path", timestampUs: 124)
-        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        let (output, error) = session(driver, [#"{"type":"apply_action","action":"Tap"}"#])
         XCTAssertNil(error)
         XCTAssertEqual(output.last,
             #"{"not_applied":"stale path","settled":false,"state":{"applied":1},"timestamp_us":124,"type":"state"}"#)
@@ -143,7 +154,7 @@ final class DriverTests: XCTestCase {
         let driver = FakeDriver()
         driver.stateMetadata.timestampUs = 123
         driver.appliedMetadata = StateMetadata(timestampUs: 122)
-        let (output, error) = session(driver, [#"{"type":"apply","action":"Tap"}"#])
+        let (output, error) = session(driver, [#"{"type":"apply_action","action":"Tap"}"#])
         XCTAssertNotNil(error)
         XCTAssertEqual(output.count, 3) // hello, initial state, error
         XCTAssertTrue(driver.stopped)
@@ -151,7 +162,7 @@ final class DriverTests: XCTestCase {
 
     func testDefaultTimestampsAreHostEpochMicrosecondsAndNondecreasing() throws {
         let before = UInt64(Date().timeIntervalSince1970 * 1_000_000)
-        let (output, error) = session(FakeDriver(), [#"{"type":"apply","action":"Tap"}"#])
+        let (output, error) = session(FakeDriver(), [#"{"type":"apply_action","action":"Tap"}"#])
         let after = UInt64(Date().timeIntervalSince1970 * 1_000_000)
         XCTAssertNil(error)
         let states = try output.dropFirst().map {
@@ -166,7 +177,7 @@ final class DriverTests: XCTestCase {
 
     func testReportsDriverErrorsToBombadilAndStopsTheApp() {
         let driver = FakeDriver()
-        let (output, error) = session(driver, [#"{"type":"apply","action":"Crash"}"#])
+        let (output, error) = session(driver, [#"{"type":"apply_action","action":"Crash"}"#])
         XCTAssertNotNil(error)
         XCTAssertTrue(output.last?.hasPrefix(#"{"message":"#) ?? false, "\(output)")
         XCTAssertTrue(output.last?.hasSuffix(#""type":"error"}"#) ?? false, "\(output)")
