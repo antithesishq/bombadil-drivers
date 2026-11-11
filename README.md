@@ -14,10 +14,13 @@ underneath them.
 | [Android](drivers/android/) | ADB / UiAutomation, with an optional in-process Compose agent | Kotlin / Gradle / Android SDK |
 | [macOS](drivers/macos/) | Black-box Accessibility driver for macOS apps | Swift / macOS |
 | [iOS](drivers/ios/) | Black-box XCTest automation through a separate WebDriverAgent runner | Swift / Xcode |
+| [Rune](drivers/rune/) | Opt-in grey-box Rune runtime, input and offscreen rendering | Rust / Rune |
 
 From the repository root, enter a shell with `nix develop .#flutter`,
 `nix develop .#android`, `nix develop .#macos`, or `nix develop .#ios`. Run project commands from
-the corresponding `drivers/` directory. Direnv selects the shell automatically
+the corresponding `drivers/` directory.
+Rune uses `nix develop .#rune` on Linux.
+Direnv selects the shell automatically
 when entering a driver directory.
 
 The framework-independent [Swift RPC SDK](lib/swift/) is shared by Swift
