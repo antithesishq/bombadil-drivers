@@ -8,6 +8,10 @@ Platform drivers use OS facilities without instrumenting the target app.
 Framework drivers can use instrumentation and do not need a platform driver
 underneath them.
 
+Read [Get started](docs/GET_STARTED.md) for the experimental RPC branch setup,
+native toolchain requirements, and fuzz campaigns. Nix is optional. With
+mdBook installed, run `mdbook build` or `mdbook serve --open` to read locally.
+
 | Project | Scope | Development |
 | --- | --- | --- |
 | [Flutter](drivers/flutter/) | Instrumented Flutter semantics and headless execution | Flutter / Dart |
@@ -16,13 +20,15 @@ underneath them.
 | [iOS](drivers/ios/) | Black-box XCTest automation through a separate WebDriverAgent runner | Swift / Xcode |
 | [Rune](drivers/rune/) | Opt-in grey-box Rune runtime, input and offscreen rendering | Rust / Rune |
 
-From the repository root, enter a shell with `nix develop .#flutter`,
-`nix develop .#android`, `nix develop .#macos`, or `nix develop .#ios`. Run project commands from
-the corresponding `drivers/` directory. For Rune on Linux, use
+For an optional Nix environment, enter a shell from the repository root with
+`nix develop .#flutter`, `nix develop .#android`, `nix develop .#macos`, or
+`nix develop .#ios`. Run project commands from the corresponding `drivers/`
+directory. For Rune on Linux, use
 `nix develop .#rune`. Direnv selects the shell when you enter a driver directory.
 
 The framework-independent [Swift RPC SDK](lib/swift/) is shared by Swift
-drivers. Its shell is `nix develop .#swift`; it is not a SwiftUI integration.
+drivers. Build it with `swift build` from `lib/swift/`, or use the optional
+`nix develop .#swift` shell. It is not a SwiftUI integration.
 
 ## License
 

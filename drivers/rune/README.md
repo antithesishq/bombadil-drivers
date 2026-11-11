@@ -13,10 +13,11 @@ Start with the [counter](examples/counter.rs) for a complete example, or
 
 ## Run
 
-From the repository root on Linux:
+Install Rust and the Linux native libraries listed in
+[Get started](../../docs/GET_STARTED.md#rust-rune), or enter the optional
+`nix develop .#rune` shell. From the repository root:
 
 ```sh
-nix develop .#rune
 cargo build --locked --manifest-path drivers/rune/Cargo.toml --examples
 bombadil external test --exit-on-violation --time-limit 10s \
   --specification drivers/rune/examples/counter.spec.ts \
