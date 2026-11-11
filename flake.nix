@@ -28,6 +28,9 @@
           macos = swift;
           ios = swift;
         }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          rune = import ./nix/rune.nix { inherit pkgs; };
+        }
       );
 
       packages = forAllSystems (system: {
