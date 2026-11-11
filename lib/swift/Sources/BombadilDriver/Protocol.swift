@@ -69,7 +69,7 @@ public enum BombadilMessage: Equatable, Decodable {
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(String.self, forKey: .type) {
-        case "apply":
+        case "apply_action":
             self = .apply(action: try container.decode(JSONValue.self, forKey: .action))
         case "terminate":
             self = .terminate
