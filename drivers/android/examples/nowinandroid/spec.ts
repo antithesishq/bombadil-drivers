@@ -1,6 +1,6 @@
 // Properties of Now in Android (demoDebug or demoBenchmarkRelease), checked
 // through the adb driver. See README.md for how to run it.
-import { always, eventually, next, now } from "@antithesishq/bombadil";
+import { always, eventually, next, now, type JSON } from "@antithesishq/bombadil";
 import {
   actions,
   extract,
@@ -46,7 +46,7 @@ type State = {
   package: string | null;
   activity: string | null;
   focus: string | null;
-  lastAction: unknown;
+  lastAction: JSON;
   /** Hand-offs to other apps the agent blocked during the last action. */
   blockedIntents: BlockedIntent[];
   windows: Window[];
